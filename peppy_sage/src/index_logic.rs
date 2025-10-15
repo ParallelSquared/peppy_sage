@@ -22,6 +22,22 @@ pub fn build_indexed_database(config: IndexingConfig, target_decoys: Vec<Peptide
     // NOTE: This is where you paste the full, adapted logic from
     // the original Parameters::build_from_peptides method.
 
+    // TODO DEBUG LOGIC
+    println!(
+        "\n[DEBUG] Building IndexedDatabase with peptide mass window: {:.4} - {:.4}",
+        config.peptide_min_mass, config.peptide_max_mass
+    );
+
+    for (i, pep) in target_decoys.iter().enumerate() {
+        let mass = pep.monoisotopic;
+        let passes = mass >= config.peptide_min_mass && mass <= config.peptide_max_mass;
+        let seq = String::from_utf8_lossy(&pep.sequence);
+        println!(
+            "[DEBUG] Peptide {:>2}: {:<10}  mass={:.4}  within_range={} ",
+            i, seq, mass, passes
+        );
+    }
+
     // --- Adapted Fragmentation Logic ---
     let mut fragments = target_decoys
         .par_iter()
