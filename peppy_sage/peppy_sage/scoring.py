@@ -45,7 +45,7 @@ class Scorer:
         Score a single spectrum (or a list of spectra) against the given database.
         Returns a list of features (PSMs).
         """
-        features = self._scorer.score_spectra(db, spectrum)
+        features = self._scorer.score_spectra(db._inner, spectrum._inner)
 
         print(f"\n--- Scoring Results ---")
         print(f"Features returned: {len(features)}")

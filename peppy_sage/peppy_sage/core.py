@@ -112,8 +112,7 @@ class Spectrum:
     @property
     def peaks(self) -> List[Tuple[float, float]]:
         """Return list of (m/z, intensity) tuples."""
-        # Assumes your PyProcessedSpectrum exposes a .peaks or equivalent getter
-        return [(p.mass, p.intensity) for p in self._inner.peaks]
+        return [(m, i) for (m, i) in self._inner.peaks]
 
     @property
     def total_ion_current(self) -> float:
@@ -185,7 +184,7 @@ class Peptide:
         self.monoisotopic_mass = mass.calculate_mass(sequence=sequence)
 
         # --- Create the Rust-side PyPeptide object ---
-        self.inner = _rust.PyPeptide(sequence, self.monoisotopic_mass, mods)
+        self._inner = _rust.PyPeptide(sequence, self.monoisotopic_mass, mods)
 
     def __repr__(self):
         mods_str = ", ".join(f"{m:.2f}" for m in self.mods)

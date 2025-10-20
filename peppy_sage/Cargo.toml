@@ -1,0 +1,13 @@
+[package]
+name = "peppy_sage"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "peppy_sage"
+crate-type = ["cdylib"]
+
+[dependencies]
+sage_core = { path = "../sage_core", package = "sage-core" }
+rayon = "1.5"
+pyo3 = { version = "0.22", features = ["extension-module", "abi3-py311"] }

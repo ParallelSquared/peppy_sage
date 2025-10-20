@@ -1,0 +1,9 @@
+# Python build artifacts
+__pycache__/
+*.pyc
+
+# Rust/PyO3 build artifacts
+peppy_sage/peppy_sage/peppy_sage.abi3.so
+target/
+*.pyd
+*.so

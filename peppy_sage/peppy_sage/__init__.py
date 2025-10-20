@@ -13,7 +13,7 @@ from .peppy_sage import (
 )
 
 # Import the high-level Python wrappers
-from .core import Peptide, Spectrum
+from .core import Peptide, Spectrum, Precursor
 from .indexing import IndexedDatabase
 from .scoring import Scorer
 
@@ -30,5 +30,6 @@ __all__ = [
     "Peptide",
     "IndexedDatabase",
     "Spectrum",
+    "Precursor",
     "Scorer",
 ]

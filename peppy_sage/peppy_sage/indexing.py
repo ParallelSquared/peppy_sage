@@ -1,7 +1,8 @@
 # indexed_database.py
 
-from typing import List, Optional, Tuple
-import peppy_sage as _rust  # your compiled PyO3 module
+from . import peppy_sage as _rust  # your compiled PyO3 module
+from typing import List, Optional, Tuple, Union
+from .core import Peptide
 
 ION_KIND_MAP = {
     #"a": _rust.PyKind.A, #TODO other ion types
@@ -11,6 +12,18 @@ ION_KIND_MAP = {
     "y": _rust.PyKind.Y,
     #"z": _rust.PyKind.Z,
 }
+
+def _to_rust_peptide(x: Union[Peptide, _rust.PyPeptide, str]) -> _rust.PyPeptide:
+    if isinstance(x, _rust.PyPeptide):
+        return x
+    if isinstance(x, Peptide):
+        # assuming your wrapper keeps the raw object on ._inner (or similar)
+        return x._inner
+    if isinstance(x, str):
+        return _rust.PyPeptide(x)
+    raise TypeError(
+        f"Expected Peptide | PyPeptide | str, got {type(x).__name__}"
+    )
 
 class IndexedDatabase:
     """
@@ -37,7 +50,7 @@ class IndexedDatabase:
     @classmethod
     def from_peptides(
             cls,
-            peptides: List["_rust.PyPeptide"],
+            peptides: List[Union[Peptide, "_rust.PyPeptide"]],
             ion_kinds: List[str],
             bucket_size: int = 8192,
             min_ion_index: int = 1,
@@ -61,15 +74,14 @@ class IndexedDatabase:
         """
 
         try:
-            ion_enum_list = [
-                ION_KIND_MAP[k.lower()]
-                for k in ion_kinds
-            ]
+            ion_enum_list = [ION_KIND_MAP[k.lower()]() for k in ion_kinds]
         except KeyError as e:
             raise ValueError(f"Invalid ion kind: {e.args[0]}. Must be one of {list(ION_KIND_MAP)}")
 
+        rust_peptides = [_to_rust_peptide(p) for p in peptides]
+
         inner = _rust.PyIndexedDatabase.from_peptides_and_config(
-            peptides=peptides,
+            peptides=rust_peptides,
             bucket_size=bucket_size,
             ion_kinds=ion_enum_list,
             min_ion_index=min_ion_index,

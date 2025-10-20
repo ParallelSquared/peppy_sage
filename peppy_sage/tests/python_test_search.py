@@ -2,6 +2,8 @@ import numpy as np
 from pyteomics import mass
 
 import peppy_sage as ps
+from peppy_sage import Precursor, Spectrum, Scorer, IndexedDatabase
+
 
 
 def test_database_build():
@@ -12,7 +14,7 @@ def test_database_build():
     peptide = ps.core.Peptide(seq)  # calculates mass and creates PyPeptide internally
 
     # Create indexed database
-    db = Database.from_peptides(
+    db = IndexedDatabase.from_peptides(
         peptides=[peptide],
         bucket_size=128,
         ion_kinds=["b", "y"],
@@ -64,6 +66,7 @@ def test_spectrum_build():
 
     print(f"Spectrum ID: {spectrum.id}")
     print(f"Peak count: {len(spectrum.peaks)}")
+    print(f"Peaks: {spectrum.peaks}")
     print(f"Precursor MZ: {spectrum.precursors[0].mz:.5f}")
 
     return spectrum

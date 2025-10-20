@@ -1,0 +1,782 @@
+// peppysage/src/lib.rs
+
+// --- MODULES ---
+pub mod index_logic;
+pub mod scoring_logic;
+
+use crate::index_logic::{build_indexed_database, IndexingConfig};
+use crate::scoring_logic::{ScorerConfig, run_scoring};
+
+// --- CORE AND PY03 IMPORTS ---
+use pyo3::prelude::*;
+use pyo3::exceptions::PyRuntimeError;
+use pyo3::types::PyString;
+use pyo3::types::PyDict;
+use std::sync::Arc;
+
+// Import ONLY the native Rust types from sage_core
+use sage_core::database::{IndexedDatabase, PeptideIx, Theoretical};
+use sage_core::enzyme::Position;
+use sage_core::peptide::Peptide;
+use sage_core::ion_series::Kind;
+use sage_core::spectrum::{ProcessedSpectrum, Peak, Precursor};
+use sage_core::mass::{Tolerance};
+use sage_core::scoring::{Scorer, ScoreType, Feature, Fragments}; // Required for PyScorer/PyFeature
+use sage_core::modification::ModificationSpecificity;
+
+
+// --- 1. DEFINE WRAPPER STRUCTS ---
+
+// Define PyPeptide, PyKind, PyModificationSpecificity, etc., first.
+
+#[pyclass(module = "peppy_sage")]
+pub struct PyIndexedDatabase {
+    pub inner: IndexedDatabase,
+}
+
+#[pyclass(module = "peppy_sage")]
+#[derive(Clone)]
+pub struct PyPeptide {
+    pub inner: Peptide,
+}
+
+#[pyclass(module = "peppy_sage")]
+#[derive(Clone, Copy)] // Clone/Copy is usually required if the native Kind enum is Copy
+pub struct PyKind {
+    pub inner: Kind, // Wraps sage_core::ion_series::Kind
+}
+
+#[pyclass(module = "peppy_sage")]
+#[derive(Copy, Clone)]
+pub struct PyTolerance {
+    pub inner: Tolerance,
+}
+
+#[pyclass(module = "peppy_sage")]
+#[derive(Clone)]
+pub struct PyFragments {
+    pub inner: Fragments,
+}
+
+#[pyclass(module = "peppy_sage")]
+#[derive(Clone)]
+pub struct PyProcessedSpectrum {
+    pub inner: ProcessedSpectrum<Peak>,
+}
+
+#[pyclass(module = "peppy_sage")]
+#[derive(Clone)]
+pub struct PyPrecursor {
+    pub inner: Precursor,
+}
+
+#[pyclass(module = "peppy_sage")]
+pub struct PyScorer {
+    // Note: Scorer requires a lifetime db, but PyO3 often simplifies this
+    // for objects passed temporarily. We wrap the configuration/parameters here.
+    // For now, we only store the configuration needed to instantiate the actual Scorer later.
+    pub config: ScorerConfig,
+}
+
+#[pyclass(module = "peppy_sage")]
+#[derive(Clone)]
+pub struct PyFeature {
+    pub inner: Feature, // Wraps the native scoring result
+}
+
+
+// --- 2. IMPLEMENT METHODS FOR WRAPPER STRUCTS ---
+
+// Now that the struct is defined, you can write the methods.
+#[pymethods]
+impl PyIndexedDatabase {
+    // ... all your static methods, getters, and other methods go here ...
+
+    #[getter]
+    pub fn peptides(&self) -> Vec<PyPeptide> {
+        self.inner
+            .peptides
+            .iter()
+            .map(|p| PyPeptide { inner: p.clone() })
+            .collect()
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (peptides, bucket_size, ion_kinds, min_ion_index, generate_decoys, decoy_tag, peptide_min_mass, peptide_max_mass))]
+    pub fn from_peptides_and_config(
+        peptides: Vec<PyPeptide>,
+        bucket_size: usize,
+        ion_kinds: Vec<PyKind>,
+        min_ion_index: usize,
+        generate_decoys: bool,
+        decoy_tag: String,
+        // Assuming PyModificationSpecificity is defined and correct
+        //potential_mods: Vec<(PyModificationSpecificity, f32)>,
+        peptide_min_mass: f32,
+        peptide_max_mass: f32,
+    ) -> PyResult<Self> {
+        // 1. Convert PyO3 wrappers to native Rust types
+        let native_peptides = peptides.into_iter().map(|p| p.inner).collect();
+        let native_ion_kinds = ion_kinds.into_iter().map(|k| k.inner).collect();
+        //let native_potential_mods = potential_mods
+        //    .into_iter()
+        //    .map(|(k, v)| (k.inner, v))
+        //    .collect();
+
+        // 2. Create the IndexingConfig struct
+        let config = IndexingConfig {
+            bucket_size,
+            ion_kinds: native_ion_kinds,
+            min_ion_index,
+            generate_decoys,
+            decoy_tag,
+            //potential_mods: native_potential_mods,
+            peptide_min_mass,
+            peptide_max_mass,
+        };
+
+        // 3. Call the core Rust logic, handling panics
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            build_indexed_database(config, native_peptides)
+        }));
+
+        match result {
+            Ok(db) => Ok(PyIndexedDatabase { inner: db }),
+            Err(_) => Err(PyRuntimeError::new_err(
+                "Rust panic occurred during indexed database generation. Check input peptides or config.",
+            )),
+        }
+    }
+
+    /// Debug helper: return a summary of all indexed fragments
+    pub fn debug_fragment_summary(&self) -> PyResult<Vec<(f32, usize)>> {
+        let mut summary = Vec::new();
+
+        for frag in &self.inner.fragments {
+            let mass = frag.fragment_mz;
+            let pep_idx = frag.peptide_index.0 as usize;
+            summary.push((mass, pep_idx));
+        }
+
+        Ok(summary)
+    }
+
+    /// Quick count of total fragments
+    pub fn fragment_count(&self) -> usize {
+        self.inner.fragments.len()
+    }
+}
+
+#[pymethods]
+impl PyScorer {
+    /// Initializes the Scorer configuration. Defaults are set for a robust DIA/Chimeric search.
+    #[new]
+    #[pyo3(signature = (
+        precursor_tol,
+        fragment_tol,
+        wide_window=true,
+        chimera=true,
+        report_psms=5,
+        min_isotope_err=-1,
+        max_isotope_err=3,
+        min_precursor_charge=2,
+        max_precursor_charge=4,
+        min_matched_peaks=3,
+        // score_type=PyScoreType::SageHyperScore, REMOVED and set as default
+        annotate_matches=false,
+        max_fragment_charge=2,
+    ))]
+    pub fn new(
+        precursor_tol: PyTolerance,
+        fragment_tol: PyTolerance,
+        wide_window: bool,
+        chimera: bool,
+        report_psms: usize,
+        min_isotope_err: i8,
+        max_isotope_err: i8,
+        min_precursor_charge: u8,
+        max_precursor_charge: u8,
+        min_matched_peaks: u16,
+        // score_type: PyScoreType, REMOVED and set SageHyperScore as default
+        annotate_matches: bool,
+        max_fragment_charge: Option<u8>
+    ) -> Self {
+        PyScorer {
+            config: ScorerConfig {
+                precursor_tol: precursor_tol.inner,
+                fragment_tol: fragment_tol.inner,
+                wide_window,
+                chimera,
+                report_psms,
+                min_matched_peaks,
+                min_isotope_err,
+                max_isotope_err,
+                min_precursor_charge,
+                max_precursor_charge,
+                score_type: ScoreType::SageHyperScore,
+
+                // Defaults for native Scorer fields
+                override_precursor_charge: false, // May need to change these defaults TODO
+                annotate_matches,
+                max_fragment_charge,
+            }
+        }
+    }
+
+    /// Executes the scoring logic against the built database and a single spectrum.
+    pub fn score_spectra(
+        &self,
+        db: &PyIndexedDatabase,
+        spectrum: PyProcessedSpectrum
+    ) -> PyResult<Vec<PyFeature>> {
+
+        // 1. Delegate execution to the external logic function
+        let native_features = run_scoring(
+            &self.config,       // Pass reference to the stored configuration
+            &db.inner,          // Pass reference to the native IndexedDatabase
+            &spectrum.inner,    // Pass reference to the native ProcessedSpectrum
+        );
+
+        // 2. Convert the native Rust output back to PyO3 wrappers
+        Ok(native_features.into_iter().map(|f| PyFeature { inner: f }).collect())
+    }
+}
+
+#[pymethods]
+impl PyPeptide {
+    // --- CONSTRUCTOR: Allows creation from Python (e.g., PyPeptide("ABC", 1200.5)) ---
+    // The signature attribute defines the Python API, allowing optional/default arguments.
+    #[new]
+    #[pyo3(signature = (sequence, monoisotopic, modifications, nterm=None, cterm=None))]
+    pub fn new(
+        sequence: String,
+        monoisotopic: f32,
+        modifications: Vec<f32>,
+        nterm: Option<f32>,
+        cterm: Option<f32>,
+    ) -> Self {
+        // WARNING: This is a minimal constructor. In a real project,
+        // you'd take all relevant fields (proteins, mods, etc.) as arguments.
+        let seq_len = sequence.len();
+
+        // 1. Create the Box<[u8]> from the string
+        let boxed_sequence: Box<[u8]> = sequence.into_bytes().into_boxed_slice();
+
+        // 2. Wrap the Boxed sequence in an Arc<[u8]> to satisfy the Peptide struct
+        //    We convert the Box<[u8]> to an Arc<[u8]>
+        let arc_sequence: Arc<[u8]> = boxed_sequence.into();
+
+        PyPeptide {
+            inner: Peptide {
+                // Convert Python string to the native Rust Box<[u8]> sequence type
+                sequence: arc_sequence,
+                monoisotopic,
+                proteins: vec![Arc::from("USER_PROVIDED_PEPPYSAGE".to_string())],
+                decoy: false,
+                // Mods vector must match sequence length
+                modifications: vec![0.0; seq_len], // TODO
+                nterm: nterm,
+                cterm: cterm,
+                missed_cleavages: 0,
+                semi_enzymatic: false,
+                position: Position::default(),
+            },
+        }
+    }
+
+    // --- GETTER: Exposes the sequence (for testing and verification) ---
+    #[getter]
+    pub fn sequence(&self) -> PyResult<String> {
+        // Convert the native Box<[u8]> sequence back to a Python string
+        String::from_utf8(self.inner.sequence.to_vec())
+            .map_err(|e| pyo3::exceptions::PyUnicodeError::new_err(e.to_string()))
+    }
+}
+
+
+#[pymethods]
+impl PyKind {
+    // Implement a simple static constructor for the B-ion kind
+    #[staticmethod]
+    pub fn B() -> Self {
+        Self { inner: Kind::B }
+    }
+
+    // Implement a simple static constructor for the Y-ion kind
+    #[staticmethod]
+    pub fn Y() -> Self {
+        Self { inner: Kind::Y }
+    }
+
+    // Add other necessary getters/methods here if needed. TODO
+}
+
+// And your other impl blocks (impl PyPeptide, impl PyKind, etc.)
+#[pymethods]
+impl PyTolerance {
+    #[staticmethod]
+    pub fn Da(minus: f32, plus: f32) -> Self {
+        Self { inner: Tolerance::Da(minus, plus) }
+    }
+
+    #[staticmethod]
+    pub fn Ppm(minus: f32, plus: f32) -> Self {
+        Self { inner: Tolerance::Ppm(minus, plus) }
+    }
+}
+
+#[pymethods]
+impl PyFragments {
+    #[getter]
+    pub fn charges(&self) -> Vec<i32> {
+        self.inner.charges.clone()
+    }
+
+    #[getter]
+    pub fn kinds(&self) -> Vec<String> {
+        // Convert `Kind` enum variants to strings for readability in Python
+        self.inner.kinds.iter().map(|k| format!("{:?}", k)).collect()
+    }
+
+    #[getter]
+    pub fn fragment_ordinals(&self) -> Vec<i32> {
+        self.inner.fragment_ordinals.clone()
+    }
+
+    #[getter]
+    pub fn intensities(&self) -> Vec<f32> {
+        self.inner.intensities.clone()
+    }
+
+    #[getter]
+    pub fn mz_calculated(&self) -> Vec<f32> {
+        self.inner.mz_calculated.clone()
+    }
+
+    #[getter]
+    pub fn mz_experimental(&self) -> Vec<f32> {
+        self.inner.mz_experimental.clone()
+    }
+
+    /// Optional helper: return as Python dict for easier pandas conversion
+    pub fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let dict = PyDict::new_bound(py);
+        dict.set_item("charges", self.charges())?;
+        dict.set_item("kinds", self.kinds())?;
+        dict.set_item("fragment_ordinals", self.fragment_ordinals())?;
+        dict.set_item("intensities", self.intensities())?;
+        dict.set_item("mz_calculated", self.mz_calculated())?;
+        dict.set_item("mz_experimental", self.mz_experimental())?;
+        Ok(dict)
+    }
+}
+
+#[pymethods]
+impl PyFeature {
+    #[getter]
+    pub fn hyperscore(&self) -> f64 {
+        self.inner.hyperscore
+    }
+
+    #[getter]
+    pub fn delta_mass(&self) -> f32 {
+        self.inner.delta_mass
+    }
+
+    #[getter]
+    pub fn rank(&self) -> u32 {
+        self.inner.rank
+    }
+
+    #[getter]
+    pub fn matched_peaks(&self) -> u32 {
+        self.inner.matched_peaks
+    }
+
+    #[getter]
+    pub fn peptide_idx(&self) -> u32 {
+        self.inner.peptide_idx.0
+    }
+
+    #[getter]
+    pub fn psm_id(&self) -> usize {
+        self.inner.psm_id
+    }
+
+    #[getter]
+    pub fn peptide_len(&self) -> usize {
+        self.inner.peptide_len
+    }
+
+    #[getter]
+    pub fn spec_id(&self) -> &str {
+        &self.inner.spec_id
+    }
+
+    #[getter]
+    pub fn file_id(&self) -> usize {
+        self.inner.file_id
+    }
+
+    #[getter]
+    pub fn label(&self) -> i32 {
+        self.inner.label
+    }
+
+    #[getter]
+    pub fn expmass(&self) -> f32 {
+        self.inner.expmass
+    }
+
+    #[getter]
+    pub fn calcmass(&self) -> f32 {
+        self.inner.calcmass
+    }
+
+    #[getter]
+    pub fn charge(&self) -> u8 {
+        self.inner.charge
+    }
+
+    #[getter]
+    pub fn rt(&self) -> f32 {
+        self.inner.rt
+    }
+
+    #[getter]
+    pub fn aligned_rt(&self) -> f32 {
+        self.inner.aligned_rt
+    }
+
+    #[getter]
+    pub fn predicted_rt(&self) -> f32 {
+        self.inner.predicted_rt
+    }
+
+    #[getter]
+    pub fn delta_rt_model(&self) -> f32 {
+        self.inner.delta_rt_model
+    }
+
+    #[getter]
+    pub fn ims(&self) -> f32 {
+        self.inner.ims
+    }
+
+    #[getter]
+    pub fn predicted_ims(&self) -> f32 {
+        self.inner.predicted_ims
+    }
+
+    #[getter]
+    pub fn delta_ims_model(&self) -> f32 {
+        self.inner.delta_ims_model
+    }
+
+    #[getter]
+    pub fn isotope_error(&self) -> f32 {
+        self.inner.isotope_error
+    }
+
+    #[getter]
+    pub fn average_ppm(&self) -> f32 {
+        self.inner.average_ppm
+    }
+
+    #[getter]
+    pub fn delta_next(&self) -> f64 {
+        self.inner.delta_next
+    }
+
+    #[getter]
+    pub fn delta_best(&self) -> f64 {
+        self.inner.delta_best
+    }
+
+    #[getter]
+    pub fn longest_b(&self) -> u32 {
+        self.inner.longest_b
+    }
+
+    #[getter]
+    pub fn longest_y(&self) -> u32 {
+        self.inner.longest_y
+    }
+
+    #[getter]
+    pub fn longest_y_pct(&self) -> f32 {
+        self.inner.longest_y_pct
+    }
+
+    #[getter]
+    pub fn missed_cleavages(&self) -> u8 {
+        self.inner.missed_cleavages
+    }
+
+    #[getter]
+    pub fn matched_intensity_pct(&self) -> f32 {
+        self.inner.matched_intensity_pct
+    }
+
+    #[getter]
+    pub fn scored_candidates(&self) -> u32 {
+        self.inner.scored_candidates
+    }
+
+    #[getter]
+    pub fn poisson(&self) -> f64 {
+        self.inner.poisson
+    }
+
+    #[getter]
+    pub fn discriminant_score(&self) -> f32 {
+        self.inner.discriminant_score
+    }
+
+    #[getter]
+    pub fn posterior_error(&self) -> f32 {
+        self.inner.posterior_error
+    }
+
+    #[getter]
+    pub fn spectrum_q(&self) -> f32 {
+        self.inner.spectrum_q
+    }
+
+    #[getter]
+    pub fn peptide_q(&self) -> f32 {
+        self.inner.peptide_q
+    }
+
+    #[getter]
+    pub fn protein_q(&self) -> f32 {
+        self.inner.protein_q
+    }
+
+    #[getter]
+    pub fn ms2_intensity(&self) -> f32 {
+        self.inner.ms2_intensity
+    }
+
+    #[getter]
+    pub fn fragments(&self) -> Option<PyFragments> {
+        self.inner.fragments.clone().map(|f| PyFragments { inner: f })
+    }
+
+    /// Helpful repr for quick printing
+    pub fn __repr__(&self) -> PyResult<String> {
+        Ok(format!(
+            "Feature(peptide_idx={}, hyperscore={:.3}, delta_mass={:.4}, matched_peaks={})",
+            self.inner.peptide_idx.0,
+            self.inner.hyperscore,
+            self.inner.delta_mass,
+            self.inner.matched_peaks
+        ))
+    }
+}
+
+#[pymethods]
+impl PyProcessedSpectrum {
+    #[new]
+    #[pyo3(signature = (id, file_id, scan_start_time, mz_array, intensity_array, precursors, total_ion_current))]
+    pub fn new(
+        id: String,
+        file_id: usize,
+        scan_start_time: f32,
+        // Accept Python lists/arrays for fragment data
+        mz_array: Vec<f32>,
+        intensity_array: Vec<f32>,
+        // Precursors would ideally be PyPrecursor wrappers, but we simplify here:
+        precursors: Vec<PyPrecursor>,
+        total_ion_current: f32,
+    ) -> PyResult<Self>
+    {   // Build the native Peak vector
+        let peaks: Vec<Peak> = mz_array.into_iter()
+            .zip(intensity_array.into_iter())
+            .map(|(mass, intensity)| Peak { mass, intensity })
+            .collect();
+
+        Ok(PyProcessedSpectrum {
+            inner: ProcessedSpectrum {
+                level: 2, // Assuming MS2 for searching
+                id,
+                file_id,
+                scan_start_time,
+                ion_injection_time: 0.0, // Default for minimal implementation
+                precursors: precursors.into_iter().map(|p| p.inner).collect(),
+                peaks,
+                total_ion_current,
+            },
+        })
+    }
+
+    #[getter]
+    pub fn id(&self) -> PyResult<String> {
+        Ok(self.inner.id.clone())
+    }
+
+    #[getter]
+    pub fn peaks(&self) -> PyResult<Vec<(f32, f32)>> {
+        // return Vec of (mz, intensity)
+        Ok(self
+            .inner
+            .peaks
+            .iter()
+            .map(|p| (p.mass, p.intensity))
+            .collect())
+    }
+
+    #[getter]
+    pub fn precursors(&self) -> PyResult<Vec<PyPrecursor>> {
+        Ok(self
+            .inner
+            .precursors
+            .iter()
+            .cloned()
+            .map(|p| PyPrecursor { inner: p })
+            .collect())
+    }
+}
+
+#[pymethods]
+impl PyPrecursor {
+    #[new]
+    #[pyo3(signature = (mz, charge=None, intensity=None, isolation_window=None, inverse_ion_mobility=None))]
+    pub fn new(
+        mz: f32,
+        charge: Option<u8>,
+        intensity: Option<f32>,
+        isolation_window: Option<PyTolerance>,
+        inverse_ion_mobility: Option<f32>,
+    ) -> PyResult<Self> {
+        Ok(PyPrecursor {
+            inner: Precursor {
+                mz,
+                intensity,
+                charge,
+                spectrum_ref: None,
+                isolation_window: isolation_window.map(|t| t.inner),
+                inverse_ion_mobility,
+                },
+            }
+        )}
+    #[getter]
+    pub fn mz(&self) -> PyResult<f32> {
+        Ok(self.inner.mz)
+    }
+    #[getter]
+    pub fn charge(&self) -> PyResult<Option<u8>> {
+        Ok(self.inner.charge)
+    }
+    #[getter]
+    pub fn intensity(&self) -> PyResult<Option<f32>> {
+        Ok(self.inner.intensity)
+    }
+    #[getter]
+    pub fn isolation_window(&self) -> PyResult<Option<PyTolerance>> {
+        Ok(self.inner.isolation_window.map(|t| PyTolerance { inner: t }))
+    }
+}
+
+// --- 3. PYMODULE EXPORT ---
+
+// The #[pymodule] function goes last.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sage_core::ion_series::Kind;
+
+    // PyO3 utility
+    use pyo3::Python;
+
+    /// Helper to create a basic PyPeptide for input.
+    fn create_test_peptide(sequence: &str, monoisotopic: f32, modifications: Vec<f32>) -> PyPeptide {
+        // Use the PyPeptide constructor we just implemented
+        PyPeptide::new(
+            sequence.to_string(),
+            monoisotopic,
+            modifications,
+            Some(0.0), // nterm
+            Some(0.0)  // cterm
+        )
+    }
+
+    #[test]
+    fn test_build_from_peptides_fasta_free() {
+        // 0. Initialize PyO3 environment
+        pyo3::prepare_freethreaded_python();
+
+        Python::with_gil(|_py| {
+            // 1. Setup Input Peptides
+            let sequence_a = "ABCDEFK";
+            let sequence_b = "XYZPQKR";
+            let peptides = vec![
+                // Note: Monoisotopic masses must be somewhat realistic
+                create_test_peptide(sequence_a, 700.0, vec![0.0; sequence_a.len()]),
+                create_test_peptide(sequence_b, 950.0, vec![0.0; sequence_b.len()]),
+            ];
+            let num_peptides = peptides.len();
+
+            // 2. Call the new PyO3 constructor method
+            let py_db_result = PyIndexedDatabase::from_peptides_and_config(
+                peptides,
+                128, // bucket_size
+                vec![PyKind { inner: Kind::B }, PyKind { inner: Kind::Y }], // ion_kinds
+                2, // min_ion_index (skips b1, b2, y1, y2)
+                true, // generate_decoys
+                "rev_".to_string(), // decoy_tag
+                500.0, // peptide_min_mass
+                1500.0 // peptide_max_mass
+            );
+
+            // 3. Assertions
+            assert!(py_db_result.is_ok(),
+                    "Failed to build PyIndexedDatabase: {:?}", py_db_result.err());
+
+            let py_db = py_db_result.unwrap();
+
+            // a. Verify peptide count (targets + decoys)
+            // Expect 4 total: A (target), A (decoy), B (target), B (decoy)
+            assert_eq!(py_db.inner.peptides.len(), 4,
+                       "Should have 2 targets and 2 decoys.");
+
+            // b. Verify fragments were generated
+            // A 7-residue peptide generates (7-1)*2 = 12 fragments. After min_ion_index=2 filter, roughly 8 per kind * 2 kinds = 16.
+            // Total fragments should be around 60+.
+            assert!(py_db.inner.fragments.len() > 50,
+                    "Should have generated a significant number of fragments.");
+
+            // c. Verify a getter works on the resulting objects
+            let first_peptide = py_db.peptides().into_iter().next().unwrap();
+            assert!(first_peptide.sequence().unwrap().contains(sequence_a) ||
+                        first_peptide.sequence().unwrap().contains(sequence_b),
+                    "First peptide sequence does not match input.");
+        });
+    }
+}
+
+// Build Test
+use pyo3::prelude::*;
+use pyo3::wrap_pyfunction;
+
+#[pyfunction]
+fn hello_py() -> PyResult<&'static str> {
+    Ok("Hello from Rust + PyO3 🎉")
+}
+
+#[pymodule]
+fn peppy_sage(_py: Python, m: Bound<'_, PyModule>) -> PyResult<()> {
+    // Register ALL classes used for I/O and configuration
+    m.add_class::<PyIndexedDatabase>()?;
+    m.add_class::<PyPeptide>()?;
+    m.add_class::<PyKind>()?;
+    m.add_class::<PyTolerance>()?; // New
+    m.add_class::<PyPrecursor>()?; // New
+    m.add_class::<PyProcessedSpectrum>()?; // New
+    m.add_class::<PyScorer>()?; // New
+    m.add_class::<PyFeature>()?; // New
+
+    m.add_function(wrap_pyfunction!(hello_py, m.clone())?)?;
+
+    Ok(())
+}
