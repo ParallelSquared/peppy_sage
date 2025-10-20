@@ -4,12 +4,12 @@ from typing import List, Optional, Tuple
 import peppy_sage as _rust  # your compiled PyO3 module
 
 ION_KIND_MAP = {
-    "a": _rust.PyKind.A,
+    #"a": _rust.PyKind.A, #TODO other ion types
     "b": _rust.PyKind.B,
-    "c": _rust.PyKind.C,
-    "x": _rust.PyKind.X,
+    #"c": _rust.PyKind.C,
+    #"x": _rust.PyKind.X,
     "y": _rust.PyKind.Y,
-    "z": _rust.PyKind.Z,
+    #"z": _rust.PyKind.Z,
 }
 
 class IndexedDatabase:

@@ -13,10 +13,9 @@ from .peppy_sage import (
 )
 
 # Import the high-level Python wrappers
-from .peptide import Peptide
-from .database import Database
-from .spectrum import Spectrum
-from .scorer import Scorer
+from .core import Peptide, Spectrum
+from .indexing import IndexedDatabase
+from .scoring import Scorer
 
 __all__ = [
     # Low-level bindings
@@ -29,7 +28,7 @@ __all__ = [
     "PyKind",
     # High-level Python API
     "Peptide",
-    "Database",
+    "IndexedDatabase",
     "Spectrum",
     "Scorer",
 ]
