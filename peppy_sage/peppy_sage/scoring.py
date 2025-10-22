@@ -47,18 +47,4 @@ class Scorer:
         """
         features = self._scorer.score_spectra(db._inner, spectrum._inner)
 
-        print(f"\n--- Scoring Results ---")
-        print(f"Features returned: {len(features)}")
-
-        for i, f in enumerate(features):
-            pep = db.peptides[f.peptide_idx]
-            print(f"\n→ Peptide: {pep.sequence}")
-            if hasattr(f, "fragments") and f.fragments is not None:
-                print("Matched fragments:")
-                print(f.fragments.to_dict())
-            print(
-                f"Feature {i}: hyperscore={f.hyperscore:.2f}, "
-                f"delta_mass={f.delta_mass:.4f}, matched_peaks={f.matched_peaks}"
-            )
-
         return features
