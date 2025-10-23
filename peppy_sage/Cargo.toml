@@ -11,3 +11,11 @@ crate-type = ["cdylib"]
 sage_core = { path = "../sage_core", package = "sage-core" }
 rayon = "1.5"
 pyo3 = { version = "0.22", features = ["extension-module", "abi3-py311"] }
+pprof = { version = "0.13", features = ["flamegraph"] }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+debug = true        # ← KEEP THIS
+strip = "none"      # ← KEEP THIS

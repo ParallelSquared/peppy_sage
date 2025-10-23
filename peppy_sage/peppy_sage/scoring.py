@@ -48,3 +48,7 @@ class Scorer:
         features = self._scorer.score_spectra(db._inner, spectrum._inner)
 
         return features
+
+    def score_many(self, db, spectra):
+        # spectra: list of Rust PyProcessedSpectrum objects
+        return self._scorer.score_many_spectra(db._inner, [s._inner for s in spectra])

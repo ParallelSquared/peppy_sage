@@ -83,12 +83,15 @@ class Spectrum:
         if total_ion_current is None:
             total_ion_current = float(np.sum(intensity_array))
 
+        mz_array   = np.asarray(mz_array, dtype=np.float32, order="C")
+        intensity_array = np.asarray(intensity_array, dtype=np.float32, order="C")
+
         self._inner = _rust.PyProcessedSpectrum(
             id,
             file_id,
             scan_start_time,
-            mz_array.tolist(),
-            intensity_array.tolist(),
+            mz_array,
+            intensity_array,
             [p._inner for p in precursors],
             total_ion_current,
         )

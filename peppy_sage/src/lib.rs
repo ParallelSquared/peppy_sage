@@ -12,7 +12,13 @@ use pyo3::prelude::*;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::types::PyString;
 use pyo3::types::PyDict;
+use pyo3::buffer::PyBuffer;
+use pyo3::types::PyAny;
 use std::sync::Arc;
+
+use pprof::ProfilerGuard;
+use std::fs::File;
+
 
 // Import ONLY the native Rust types from sage_core
 use sage_core::database::{IndexedDatabase, PeptideIx, Theoretical};
@@ -23,7 +29,6 @@ use sage_core::spectrum::{ProcessedSpectrum, Peak, Precursor};
 use sage_core::mass::{Tolerance};
 use sage_core::scoring::{Scorer, ScoreType, Feature, Fragments}; // Required for PyScorer/PyFeature
 use sage_core::modification::ModificationSpecificity;
-
 
 // --- 1. DEFINE WRAPPER STRUCTS ---
 
@@ -222,20 +227,56 @@ impl PyScorer {
             }
         }
     }
+    pub fn score_many_spectra(
+        &self,
+        py: pyo3::Python<'_>,
+        db: &PyIndexedDatabase,
+        spectra: Vec<Py<PyProcessedSpectrum>>,   // <— faster extraction
+    ) -> PyResult<Vec<Vec<PyFeature>>> {
+        let guard = ProfilerGuard::new(100).ok(); // 100 Hz sampler
+
+        // Clone native spectra while holding the GIL
+        let mut rust_specs = Vec::with_capacity(spectra.len());
+        for handle in &spectra {
+            let borrowed = handle.borrow(py);
+            rust_specs.push(borrowed.inner.clone());
+        }
+
+        // Heavy work without the GIL
+        let results = py.allow_threads(|| {
+            rust_specs
+                .iter()
+                .map(|spec| crate::scoring_logic::run_scoring(&self.config, &db.inner, spec))
+                .collect::<Vec<_>>()
+        });
+
+        if let Some(g) = guard {
+            if let Ok(report) = g.report().build() {
+                if let Ok(file) = File::create("peppy_sage_score_many.svg") {
+                    let _ = report.flamegraph(file);
+                }
+            }
+        }
+
+        Ok(results
+            .into_iter()
+            .map(|v| v.into_iter().map(|f| PyFeature { inner: f }).collect())
+            .collect())
+    }
 
     /// Executes the scoring logic against the built database and a single spectrum.
     pub fn score_spectra(
         &self,
+        py: pyo3::Python<'_>,
         db: &PyIndexedDatabase,
-        spectrum: PyProcessedSpectrum
+        spectrum: &PyProcessedSpectrum
     ) -> PyResult<Vec<PyFeature>> {
 
         // 1. Delegate execution to the external logic function
-        let native_features = run_scoring(
-            &self.config,       // Pass reference to the stored configuration
-            &db.inner,          // Pass reference to the native IndexedDatabase
-            &spectrum.inner,    // Pass reference to the native ProcessedSpectrum
-        );
+        // run native Rust without the GIL
+        let native_features = py.allow_threads(|| {
+            run_scoring(&self.config, &db.inner, &spectrum.inner)
+        });
 
         // 2. Convert the native Rust output back to PyO3 wrappers
         Ok(native_features.into_iter().map(|f| PyFeature { inner: f }).collect())
@@ -579,30 +620,53 @@ impl PyFeature {
 impl PyProcessedSpectrum {
     #[new]
     #[pyo3(signature = (id, file_id, scan_start_time, mz_array, intensity_array, precursors, total_ion_current))]
-    pub fn new(
+    pub fn new<'py>(
+        py: Python<'py>,                        // get a GIL handle in the constructor
         id: String,
         file_id: usize,
         scan_start_time: f32,
-        // Accept Python lists/arrays for fragment data
-        mz_array: Vec<f32>,
-        intensity_array: Vec<f32>,
-        // Precursors would ideally be PyPrecursor wrappers, but we simplify here:
+        // accept *any* buffer-exporting object (NumPy array, memoryview, array('f'), etc.)
+        mz_array: Bound<'py, PyAny>,
+        intensity_array: Bound<'py, PyAny>,
         precursors: Vec<PyPrecursor>,
         total_ion_current: f32,
-    ) -> PyResult<Self>
-    {   // Build the native Peak vector
-        let peaks: Vec<Peak> = mz_array.into_iter()
-            .zip(intensity_array.into_iter())
-            .map(|(mass, intensity)| Peak { mass, intensity })
+    ) -> PyResult<Self> {
+        // 1) Acquire typed buffers (float32) using the *bound* API
+        let buf_mz:  PyBuffer<f32> = PyBuffer::get_bound(&mz_array)?;
+        let buf_int: PyBuffer<f32> = PyBuffer::get_bound(&intensity_array)?;
+
+        // 2) Validate shape/layout
+        if !buf_mz.is_c_contiguous() || !buf_int.is_c_contiguous() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "mz_array and intensity_array must be C-contiguous float32 buffers",
+            ));
+        }
+        if buf_mz.item_count() != buf_int.item_count() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "mz_array and intensity_array must be the same length",
+            ));
+        }
+
+        // 3) Borrow as slices (zero Python-float boxing), then copy once to Vecs
+        //    SAFETY: dtype verified by PyBuffer<f32> and contiguity checked above
+        let mz_cells  = unsafe { buf_mz.as_slice(py) }
+            .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("Failed to get mz_array slice"))?;
+        let int_cells = unsafe { buf_int.as_slice(py) }
+            .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("Failed to get intensity_array slice"))?;
+
+        // 4) Pack into Peaks (owned, mutable on Rust side)
+        let peaks: Vec<Peak> = mz_cells.iter()
+            .zip(int_cells.iter())
+            .map(|(m, i)| Peak { mass: m.get(), intensity: i.get() })
             .collect();
 
         Ok(PyProcessedSpectrum {
             inner: ProcessedSpectrum {
-                level: 2, // Assuming MS2 for searching
+                level: 2,
                 id,
                 file_id,
                 scan_start_time,
-                ion_injection_time: 0.0, // Default for minimal implementation
+                ion_injection_time: 0.0,
                 precursors: precursors.into_iter().map(|p| p.inner).collect(),
                 peaks,
                 total_ion_current,
@@ -765,7 +829,7 @@ fn hello_py() -> PyResult<&'static str> {
 }
 
 #[pymodule]
-fn peppy_sage(_py: Python, m: Bound<'_, PyModule>) -> PyResult<()> {
+fn peppy_sage(py: Python, m: Bound<'_, PyModule>) -> PyResult<()> {
     // Register ALL classes used for I/O and configuration
     m.add_class::<PyIndexedDatabase>()?;
     m.add_class::<PyPeptide>()?;
