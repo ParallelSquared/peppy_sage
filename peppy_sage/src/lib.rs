@@ -14,6 +14,8 @@ use pyo3::types::PyString;
 use pyo3::types::PyDict;
 use pyo3::buffer::PyBuffer;
 use pyo3::types::PyAny;
+use rayon::prelude::*;
+use rayon::ThreadPoolBuilder;
 use std::sync::Arc;
 
 use pprof::ProfilerGuard;
@@ -36,7 +38,7 @@ use sage_core::modification::ModificationSpecificity;
 
 #[pyclass(module = "peppy_sage")]
 pub struct PyIndexedDatabase {
-    pub inner: IndexedDatabase,
+    pub inner: Arc<IndexedDatabase>,
 }
 
 #[pyclass(module = "peppy_sage")]
@@ -66,7 +68,7 @@ pub struct PyFragments {
 #[pyclass(module = "peppy_sage")]
 #[derive(Clone)]
 pub struct PyProcessedSpectrum {
-    pub inner: ProcessedSpectrum<Peak>,
+    pub inner: Arc<ProcessedSpectrum<Peak>>,
 }
 
 #[pyclass(module = "peppy_sage")]
@@ -87,6 +89,7 @@ pub struct PyScorer {
 #[derive(Clone)]
 pub struct PyFeature {
     pub inner: Feature, // Wraps the native scoring result
+    pub sequence: Option<String>
 }
 
 
@@ -146,11 +149,17 @@ impl PyIndexedDatabase {
         }));
 
         match result {
-            Ok(db) => Ok(PyIndexedDatabase { inner: db }),
+            Ok(db) => Ok(PyIndexedDatabase { inner: Arc::new(db) }), // ✅ wrap once here
             Err(_) => Err(PyRuntimeError::new_err(
-                "Rust panic occurred during indexed database generation. Check input peptides or config.",
+                "Rust panic occurred during indexed database generation.",
             )),
         }
+    }
+
+    pub fn sequence_for(&self, pep_index: u32) -> Option<String> {
+        self.inner.peptides
+            .get(pep_index as usize)
+            .map(|p| String::from_utf8_lossy(&p.sequence).into_owned())
     }
 
     /// Debug helper: return a summary of all indexed fragments
@@ -170,6 +179,12 @@ impl PyIndexedDatabase {
     pub fn fragment_count(&self) -> usize {
         self.inner.fragments.len()
     }
+}
+
+fn peptide_seq_by_idx(db: &IndexedDatabase, idx: &PeptideIx) -> Option<String> {
+    db.peptides
+        .get(idx.0 as usize)
+        .map(|p| String::from_utf8_lossy(&p.sequence).into_owned())
 }
 
 #[pymethods]
@@ -227,29 +242,47 @@ impl PyScorer {
             }
         }
     }
+
     pub fn score_many_spectra(
         &self,
         py: pyo3::Python<'_>,
         db: &PyIndexedDatabase,
         spectra: Vec<Py<PyProcessedSpectrum>>,   // <— faster extraction
     ) -> PyResult<Vec<Vec<PyFeature>>> {
-        let guard = ProfilerGuard::new(100).ok(); // 100 Hz sampler
+        //let guard = ProfilerGuard::new(100).ok(); // 100 Hz sampler
 
-        // Clone native spectra while holding the GIL
-        let mut rust_specs = Vec::with_capacity(spectra.len());
+        // 1) Snapshot Rust-owned data while holding the GIL
+        let mut rust_specs: Vec<Arc<ProcessedSpectrum<Peak>>> = Vec::with_capacity(spectra.len());
         for handle in &spectra {
-            let borrowed = handle.borrow(py);
-            rust_specs.push(borrowed.inner.clone());
+            let s = handle.borrow(py);
+            rust_specs.push(Arc::clone(&s.inner)); // O(1) Arc clone
         }
+        let db_arc = Arc::clone(&db.inner);        // O(1) Arc clone
+        let cfg = self.config.clone();             // cheap struct clone
 
-        // Heavy work without the GIL
+        // 2) Build a custom Rayon thread pool if requested
+        let mut num_threads = Some(32);
         let results = py.allow_threads(|| {
-            rust_specs
-                .iter()
-                .map(|spec| crate::scoring_logic::run_scoring(&self.config, &db.inner, spec))
-                .collect::<Vec<_>>()
+            if let Some(n_threads) = num_threads {
+                ThreadPoolBuilder::new()
+                    .num_threads(n_threads)
+                    .build()
+                    .expect("Failed to build Rayon thread pool")
+                    .install(|| {
+                        rust_specs
+                            .par_iter()
+                            .map(|spec| crate::scoring_logic::run_scoring(&cfg, &db_arc, spec))
+                            .collect::<Vec<_>>()
+                    })
+            } else {
+                rust_specs
+                    .par_iter()
+                    .map(|spec| crate::scoring_logic::run_scoring(&cfg, &db_arc, spec))
+                    .collect::<Vec<_>>()
+            }
         });
 
+        /*
         if let Some(g) = guard {
             if let Ok(report) = g.report().build() {
                 if let Ok(file) = File::create("peppy_sage_score_many.svg") {
@@ -257,12 +290,17 @@ impl PyScorer {
                 }
             }
         }
+        */
 
         Ok(results
             .into_iter()
-            .map(|v| v.into_iter().map(|f| PyFeature { inner: f }).collect())
+            .map(|v| v.into_iter().map(|f| {
+                let seq = peptide_seq_by_idx(&*db_arc, &f.peptide_idx);
+                PyFeature { inner: f, sequence: seq }
+            }).collect())
             .collect())
     }
+
 
     /// Executes the scoring logic against the built database and a single spectrum.
     pub fn score_spectra(
@@ -279,7 +317,12 @@ impl PyScorer {
         });
 
         // 2. Convert the native Rust output back to PyO3 wrappers
-        Ok(native_features.into_iter().map(|f| PyFeature { inner: f }).collect())
+        let db_arc = Arc::clone(&db.inner);
+        Ok(native_features.into_iter().map(|f| {
+            // If db is Arc<IndexedDatabase>, pass &*db_arc to get &IndexedDatabase
+            let seq = peptide_seq_by_idx(&*db_arc, &f.peptide_idx);
+            PyFeature { inner: f, sequence: seq }
+        }).collect())
     }
 }
 
@@ -414,6 +457,10 @@ impl PyFragments {
 
 #[pymethods]
 impl PyFeature {
+    pub fn sequence(&self) -> Option<&str> {
+        self.sequence.as_deref()
+    }
+
     #[getter]
     pub fn hyperscore(&self) -> f64 {
         self.inner.hyperscore
@@ -607,12 +654,69 @@ impl PyFeature {
     /// Helpful repr for quick printing
     pub fn __repr__(&self) -> PyResult<String> {
         Ok(format!(
-            "Feature(peptide_idx={}, hyperscore={:.3}, delta_mass={:.4}, matched_peaks={})",
+            "Feature(spec={}, peptide_idx={}, rank={}, hyperscore={:.3}, delta_mass={:.4}, \n\
+                matched_peaks={}, isotope error={}, average_ppm={:.3}, poisson={:.4})",
+            self.inner.spec_id,
             self.inner.peptide_idx.0,
+            self.inner.rank,
             self.inner.hyperscore,
             self.inner.delta_mass,
-            self.inner.matched_peaks
+            self.inner.matched_peaks,
+            self.inner.isotope_error,
+            self.inner.average_ppm,
+            self.inner.poisson
         ))
+    }
+
+    pub fn to_dict(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let d = PyDict::new_bound(py);
+        d.set_item("file_id", self.inner.file_id)?;
+        d.set_item("spec_id", self.inner.spec_id.clone())?;
+        d.set_item("psm_id", self.inner.psm_id)?;
+        d.set_item("rank", self.inner.rank)?;
+        d.set_item("sequence", self.sequence.clone())?;
+        //TODO modifications
+        d.set_item("label", self.inner.label)?;
+        d.set_item("hyperscore", self.inner.hyperscore)?;
+        d.set_item("delta_mass", self.inner.delta_mass)?;
+        d.set_item("matched_peaks", self.inner.matched_peaks)?;
+        d.set_item("peptide_len", self.inner.peptide_len)?;
+        d.set_item("expmass", self.inner.expmass)?;
+        d.set_item("calcmass", self.inner.calcmass)?;
+        d.set_item("charge", self.inner.charge)?;
+        d.set_item("rt", self.inner.rt)?;
+        d.set_item("aligned_rt", self.inner.aligned_rt)?;
+        d.set_item("predicted_rt", self.inner.predicted_rt)?;
+        d.set_item("delta_rt_model", self.inner.delta_rt_model)?;
+        d.set_item("ims", self.inner.ims)?;
+        d.set_item("predicted_ims", self.inner.predicted_ims)?;
+        d.set_item("delta_ims_model", self.inner.delta_ims_model)?;
+        d.set_item("isotope_error", self.inner.isotope_error)?;
+        d.set_item("average_ppm", self.inner.average_ppm)?;
+        d.set_item("delta_next", self.inner.delta_next)?;
+        d.set_item("delta_best", self.inner.delta_best)?;
+        d.set_item("longest_b", self.inner.longest_b)?;
+        d.set_item("longest_y", self.inner.longest_y)?;
+        d.set_item("longest_y_pct", self.inner.longest_y_pct)?;
+        d.set_item("missed_cleavages", self.inner.missed_cleavages)?;
+        d.set_item("matched_intensity_pct", self.inner.matched_intensity_pct)?;
+        d.set_item("scored_candidates", self.inner.scored_candidates)?;
+        d.set_item("poisson", self.inner.poisson)?;
+        d.set_item("discriminant_score", self.inner.discriminant_score)?;
+        d.set_item("posterior_error", self.inner.posterior_error)?;
+        d.set_item("spectrum_q", self.inner.spectrum_q)?;
+        d.set_item("peptide_q", self.inner.peptide_q)?;
+        d.set_item("protein_q", self.inner.protein_q)?;
+        d.set_item("ms2_intensity", self.inner.ms2_intensity)?;
+
+        // Optionally include fragment info, if present
+        if let Some(f) = &self.inner.fragments {
+            d.set_item("fragments", PyFragments { inner: f.clone() }.to_dict(py)?)?;
+        } else {
+            d.set_item("fragments", py.None())?;
+        }
+
+        Ok(d.into())
     }
 }
 
@@ -661,7 +765,7 @@ impl PyProcessedSpectrum {
             .collect();
 
         Ok(PyProcessedSpectrum {
-            inner: ProcessedSpectrum {
+            inner: Arc::new(ProcessedSpectrum {
                 level: 2,
                 id,
                 file_id,
@@ -670,7 +774,7 @@ impl PyProcessedSpectrum {
                 precursors: precursors.into_iter().map(|p| p.inner).collect(),
                 peaks,
                 total_ion_current,
-            },
+            }),
         })
     }
 
