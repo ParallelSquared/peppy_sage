@@ -162,32 +162,33 @@ class Peptide:
     Handles sequence, modifications, and mass calculation.
     """
 
-    def __init__(self, sequence: str, mods: List[float] | None = None):
+    def __init__(self, sequence: str, mods: List[float] | None = None): #TODO handle n-term and c-term
         """
         Parameters
         ----------
         sequence : str
             Peptide amino acid sequence (e.g., "PEPTIDEK")
         mods : List[float], optional
-            Array of modification masses (same length as sequence).
+            Array of modification masses (length of sequence + 2).
             Default is zeros (no mods).
         """
         self.sequence = sequence
 
         if mods is None:
-            mods = [0.0] * len(sequence)
-        elif len(mods) != len(sequence):
+            mods = [0.0] * (len(sequence) + 2)
+        elif len(mods) != (len(sequence) + 2):
             raise ValueError(
-                f"Modification array must have same length as sequence ({len(sequence)})."
+                f"Modification array must have length sequence ({len(sequence)}) + 2."
             )
 
         self.mods = mods
 
         # --- Calculate precursor mass using pyteomics ---
         self.monoisotopic_mass = mass.calculate_mass(sequence=sequence)
+        self.monoisotopic_mass += sum(mods)
 
         # --- Create the Rust-side PyPeptide object ---
-        self._inner = _rust.PyPeptide(sequence, self.monoisotopic_mass, mods)
+        self._inner = _rust.PyPeptide(sequence, self.monoisotopic_mass, mods, mods[0], mods[-1])
 
     def __repr__(self):
         mods_str = ", ".join(f"{m:.2f}" for m in self.mods)

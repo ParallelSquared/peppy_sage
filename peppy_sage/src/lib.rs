@@ -335,7 +335,7 @@ impl PyPeptide {
     pub fn new(
         sequence: String,
         monoisotopic: f32,
-        modifications: Vec<f32>,
+        modifications: Option<Vec<f32>>,
         nterm: Option<f32>,
         cterm: Option<f32>,
     ) -> Self {
@@ -358,7 +358,7 @@ impl PyPeptide {
                 proteins: vec![Arc::from("USER_PROVIDED_PEPPYSAGE".to_string())],
                 decoy: false,
                 // Mods vector must match sequence length
-                modifications: vec![0.0; seq_len], // TODO
+                modifications: modifications.unwrap_or(vec![0.0; seq_len]),
                 nterm: nterm,
                 cterm: cterm,
                 missed_cleavages: 0,
@@ -863,7 +863,7 @@ mod tests {
         PyPeptide::new(
             sequence.to_string(),
             monoisotopic,
-            modifications,
+            Some(modifications),
             Some(0.0), // nterm
             Some(0.0)  // cterm
         )

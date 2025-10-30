@@ -11,14 +11,14 @@ def test_database_build():
 
     # Create peptide(s)
     seq = "PEPTIDEK"
-    peptide = ps.core.Peptide(seq)  # calculates mass and creates PyPeptide internally
+    peptide = ps.core.Peptide(seq, [0.0]*9 + [14.0])  # calculates mass and creates PyPeptide internally
 
     # Create indexed database
     db = IndexedDatabase.from_peptides(
         peptides=[peptide],
         bucket_size=128,
         ion_kinds=["b", "y"],
-        min_ion_index=2,
+        min_ion_index=0,
         generate_decoys=False,
         decoy_tag="rev_",
         peptide_min_mass=0.0,
