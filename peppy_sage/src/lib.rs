@@ -316,6 +316,8 @@ impl PyScorer {
             run_scoring(&self.config, &db.inner, &spectrum.inner)
         });
 
+        println!("Scoring returned {} features", native_features.len());
+
         // 2. Convert the native Rust output back to PyO3 wrappers
         let db_arc = Arc::clone(&db.inner);
         Ok(native_features.into_iter().map(|f| {
@@ -368,12 +370,16 @@ impl PyPeptide {
         }
     }
 
-    // --- GETTER: Exposes the sequence (for testing and verification) ---
     #[getter]
     pub fn sequence(&self) -> PyResult<String> {
         // Convert the native Box<[u8]> sequence back to a Python string
         String::from_utf8(self.inner.sequence.to_vec())
             .map_err(|e| pyo3::exceptions::PyUnicodeError::new_err(e.to_string()))
+    }
+
+    #[getter]
+    pub fn modifications(&self) -> PyResult<Vec<f32>> {
+        Ok(self.inner.modifications.clone())
     }
 }
 
@@ -460,6 +466,11 @@ impl PyFeature {
     #[getter]
     pub fn peptide(&self) -> Option<PyPeptide> {
         self.peptide.clone()
+    }
+
+    #[setter]
+    pub fn set_peptide(&mut self, peptide: Option<PyPeptide>) {
+        self.peptide = peptide;
     }
 
     #[getter]
@@ -665,12 +676,23 @@ impl PyFeature {
 
     /// Helpful repr for quick printing
     pub fn __repr__(&self) -> PyResult<String> {
+        let (seq, mods) = if let Some(p) = &self.peptide {
+            (
+                String::from_utf8_lossy(&p.inner.sequence).into_owned(),
+                format!("{:?}", p.inner.modifications),
+            )
+        } else {
+            ("<None>".to_string(), "<None>".to_string())
+        };
+
         Ok(format!(
-            "Feature(spec={}, peptide_idx={}, rank={}, hyperscore={:.3}, delta_mass={:.4}, \n\
-                matched_peaks={}, isotope error={}, average_ppm={:.3}, poisson={:.4})",
+            "Feature(spec={}, peptide_idx={}, rank={}, seq={}, mods={}, hyperscore={:.3}, \
+                delta_mass={:.4}, \n matched_peaks={}, isotope error={}, average_ppm={:.3}, poisson={:.4})",
             self.inner.spec_id,
             self.inner.peptide_idx.0,
             self.inner.rank,
+            seq,
+            mods,
             self.inner.hyperscore,
             self.inner.delta_mass,
             self.inner.matched_peaks,

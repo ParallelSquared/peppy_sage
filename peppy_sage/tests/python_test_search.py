@@ -11,7 +11,7 @@ def test_database_build():
 
     # Create peptide(s)
     seq = "PEPTIDEK"
-    peptide = ps.core.Peptide(seq, [0.0]*9 + [14.0])  # calculates mass and creates PyPeptide internally
+    peptide = ps.core.Peptide(seq)  # calculates mass and creates PyPeptide internally
 
     # Create indexed database
     db = IndexedDatabase.from_peptides(
@@ -80,10 +80,24 @@ def test_scoring(db, spectrum):
         fragment_tol_ppm=(-5, 5),
         annotate_matches=True,
         report_psms=10,
+        chimera=False
     )
 
     features = scorer.score(db, spectrum)
     print(f"Total features returned: {len(features)}")
+
+    for f in features:
+        print("1")
+        print(f)
+        print(f.to_dict)
+        print(f.to_dict())
+
+    for f in features:
+        print(f.peptide.calculate_theoretical_mz(1))
+        d = f.to_dict()
+        print(d)
+        print(d['sequence'])
+        print(d['modifications'])
 
 
 if __name__ == "__main__":

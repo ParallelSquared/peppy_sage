@@ -193,6 +193,14 @@ class Peptide:
         # --- Create the Rust-side PyPeptide object ---
         self._inner = _rust.PyPeptide(sequence, self.monoisotopic_mass, mods, mods[0], mods[-1])
 
+    @classmethod
+    def from_rust(cls, rust_peptide: _rust.PyPeptide) -> "Peptide":
+        """Construct a Python Peptide from a Rust PyPeptide object."""
+        sequence = rust_peptide.sequence
+        # Rust mods are floats
+        mods = rust_peptide.modifications.copy()
+        return cls(sequence, mods)
+
     def calculate_theoretical_mz(self, z=1):
         return (self.monoisotopic_mass + (PROTON_MASS * z)) / z
 
