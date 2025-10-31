@@ -4,6 +4,9 @@ from pyteomics import mass
 import peppy_sage as _rust  # your compiled PyO3 module
 
 
+PROTON_MASS = 1.0072764
+
+
 class Precursor:
     """
     Lightweight Python wrapper for PyPrecursor (MS1 parent ion).
@@ -189,6 +192,9 @@ class Peptide:
 
         # --- Create the Rust-side PyPeptide object ---
         self._inner = _rust.PyPeptide(sequence, self.monoisotopic_mass, mods, mods[0], mods[-1])
+
+    def calculate_theoretical_mz(self, z=1):
+        return (self.monoisotopic_mass + (PROTON_MASS * z)) / z
 
     def __repr__(self):
         mods_str = ", ".join(f"{m:.2f}" for m in self.mods)

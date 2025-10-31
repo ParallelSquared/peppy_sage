@@ -88,8 +88,8 @@ pub struct PyScorer {
 #[pyclass(module = "peppy_sage")]
 #[derive(Clone)]
 pub struct PyFeature {
-    pub inner: Feature, // Wraps the native scoring result
-    pub sequence: Option<String>
+    pub inner: Feature,
+    pub peptide: Option<PyPeptide>,
 }
 
 
@@ -181,10 +181,10 @@ impl PyIndexedDatabase {
     }
 }
 
-fn peptide_seq_by_idx(db: &IndexedDatabase, idx: &PeptideIx) -> Option<String> {
+fn peptide_by_idx(db: &IndexedDatabase, idx: &PeptideIx) -> Option<PyPeptide> {
     db.peptides
         .get(idx.0 as usize)
-        .map(|p| String::from_utf8_lossy(&p.sequence).into_owned())
+        .map(|p| PyPeptide { inner: p.clone() })
 }
 
 #[pymethods]
@@ -261,7 +261,7 @@ impl PyScorer {
         let cfg = self.config.clone();             // cheap struct clone
 
         // 2) Build a custom Rayon thread pool if requested
-        let mut num_threads = Some(32);
+        let mut num_threads = Some(32); //TODO
         let results = py.allow_threads(|| {
             if let Some(n_threads) = num_threads {
                 ThreadPoolBuilder::new()
@@ -295,8 +295,8 @@ impl PyScorer {
         Ok(results
             .into_iter()
             .map(|v| v.into_iter().map(|f| {
-                let seq = peptide_seq_by_idx(&*db_arc, &f.peptide_idx);
-                PyFeature { inner: f, sequence: seq }
+                let pep = peptide_by_idx(&*db_arc, &f.peptide_idx);
+                PyFeature { inner: f, peptide: pep }
             }).collect())
             .collect())
     }
@@ -320,8 +320,8 @@ impl PyScorer {
         let db_arc = Arc::clone(&db.inner);
         Ok(native_features.into_iter().map(|f| {
             // If db is Arc<IndexedDatabase>, pass &*db_arc to get &IndexedDatabase
-            let seq = peptide_seq_by_idx(&*db_arc, &f.peptide_idx);
-            PyFeature { inner: f, sequence: seq }
+            let pep = peptide_by_idx(&*db_arc, &f.peptide_idx);
+            PyFeature { inner: f, peptide: pep }
         }).collect())
     }
 }
@@ -457,8 +457,20 @@ impl PyFragments {
 
 #[pymethods]
 impl PyFeature {
-    pub fn sequence(&self) -> Option<&str> {
-        self.sequence.as_deref()
+    #[getter]
+    pub fn peptide(&self) -> Option<PyPeptide> {
+        self.peptide.clone()
+    }
+
+    #[getter]
+    pub fn sequence(&self) -> Option<String> {
+        self.peptide.as_ref()
+            .map(|p| String::from_utf8_lossy(&p.inner.sequence).into_owned())
+    }
+
+    #[getter]
+    pub fn modifications(&self) -> Option<Vec<f32>> {
+        self.peptide.as_ref().map(|p| p.inner.modifications.clone())
     }
 
     #[getter]
@@ -674,8 +686,13 @@ impl PyFeature {
         d.set_item("spec_id", self.inner.spec_id.clone())?;
         d.set_item("psm_id", self.inner.psm_id)?;
         d.set_item("rank", self.inner.rank)?;
-        d.set_item("sequence", self.sequence.clone())?;
-        //TODO modifications
+        if let Some(p) = &self.peptide {
+            d.set_item("sequence", String::from_utf8_lossy(&p.inner.sequence).into_owned())?;
+            d.set_item("modifications", p.inner.modifications.clone())?;
+        } else {
+            d.set_item("sequence", py.None())?;
+            d.set_item("modifications", py.None())?;
+        }
         d.set_item("label", self.inner.label)?;
         d.set_item("hyperscore", self.inner.hyperscore)?;
         d.set_item("delta_mass", self.inner.delta_mass)?;
