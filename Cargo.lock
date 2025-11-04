@@ -477,6 +477,8 @@ dependencies = [
 name = "peppy_sage"
 version = "0.1.0"
 dependencies = [
+ "dashmap",
+ "fnv",
  "pprof",
  "pyo3",
  "rayon",

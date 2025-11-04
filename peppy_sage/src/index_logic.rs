@@ -2,6 +2,9 @@ use sage_core::database::{IndexedDatabase, PeptideIx, Theoretical};
 use sage_core::peptide::Peptide;
 use sage_core::ion_series::{IonSeries, Kind};
 use sage_core::modification::ModificationSpecificity;
+use std::sync::Arc;
+use dashmap::DashSet;
+use fnv::FnvBuildHasher;
 use rayon::prelude::*;
 // Add imports for types used in the original logic (e.g., DashSet, FnvBuildHasher, etc. if you copied that part)
 
@@ -18,25 +21,43 @@ pub struct IndexingConfig {
 }
 
 // 2. Define the core indexing function (pasting the adapted logic)
-pub fn build_indexed_database(config: IndexingConfig, target_decoys: Vec<Peptide>) -> IndexedDatabase {
+pub fn build_indexed_database(config: IndexingConfig, targets: Vec<Peptide>) -> IndexedDatabase {
     // NOTE: This is where you paste the full, adapted logic from
     // the original Parameters::build_from_peptides method.
 
-    // TODO DEBUG LOGIC
-    // QQQ
+    let peptides = if config.generate_decoys {
+        // gather target sequences for collision checks
+        let target_seqs: DashSet<Arc<[u8]>, FnvBuildHasher> = DashSet::default();
+        targets
+            .par_iter()
+            .filter(|p| !p.decoy)
+            .for_each(|p| {
+                target_seqs.insert(p.sequence.clone());
+            });
 
-    for (i, pep) in target_decoys.iter().enumerate() {
-        let mass = pep.monoisotopic;
-        let passes = mass >= config.peptide_min_mass && mass <= config.peptide_max_mass;
-        let seq = String::from_utf8_lossy(&pep.sequence);
-        //println!(
-        //    "[DEBUG] Peptide {:>2}: {:<10}  mass={:.4}  within_range={} ",
-        //    i, seq, mass, passes
-        //);
-    }
+        // build output = targets (+ valid reversed decoys)
+        let out: Vec<Peptide> = targets
+            .into_par_iter()
+            .flat_map_iter(|p| {
+                // always keep the target
+                let mut v = Vec::with_capacity(2);
+                v.push(p.clone());
+
+                // reversed decoy; skip if reversed equals a real target sequence
+                let rev = p.reverse();
+                if !target_seqs.contains(&rev.sequence) {
+                    v.push(rev);
+                }
+                v.into_iter()
+            })
+            .collect(); // CHANGE: collect the parallel stream directly
+        out
+    } else {
+        targets
+    };
 
     // --- Adapted Fragmentation Logic ---
-    let mut fragments = target_decoys
+    let mut fragments = peptides
         .par_iter()
         .enumerate()
         .flat_map(|(idx, peptide)| {
@@ -81,7 +102,7 @@ pub fn build_indexed_database(config: IndexingConfig, target_decoys: Vec<Peptide
 
     // 3. Final Struct Return
     IndexedDatabase {
-        peptides: target_decoys,
+        peptides: peptides,
         fragments,
         min_value,
         bucket_size: config.bucket_size,
