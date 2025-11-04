@@ -204,6 +204,28 @@ class Peptide:
     def calculate_theoretical_mz(self, z=1):
         return (self.monoisotopic_mass + (PROTON_MASS * z)) / z
 
+    @staticmethod
+    def calculate_theoretical_mz(seq, mods, z) -> float:
+        """
+        Compute the theoretical m/z for a peptide.
+
+        Parameters
+        ----------
+        monoisotopic_mass : float
+            Mass of the peptide (including modifications if any)
+        charge : int
+            Charge state
+
+        Returns
+        -------
+        float
+            Theoretical m/z
+        """
+        monoisotopic_mass = mass.calculate_mass(sequence=seq)
+        monoisotopic_mass += sum(mods)
+
+        return (monoisotopic_mass + PROTON_MASS * z) / z
+
     def __repr__(self):
         mods_str = ", ".join(f"{m:.2f}" for m in self.mods)
         return (

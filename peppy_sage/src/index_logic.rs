@@ -23,10 +23,7 @@ pub fn build_indexed_database(config: IndexingConfig, target_decoys: Vec<Peptide
     // the original Parameters::build_from_peptides method.
 
     // TODO DEBUG LOGIC
-    //println!(
-    //    "\n[DEBUG] Building IndexedDatabase with peptide mass window: {:.4} - {:.4}",
-    //    config.peptide_min_mass, config.peptide_max_mass
-    //);
+    // QQQ
 
     for (i, pep) in target_decoys.iter().enumerate() {
         let mass = pep.monoisotopic;
@@ -93,4 +90,33 @@ pub fn build_indexed_database(config: IndexingConfig, target_decoys: Vec<Peptide
         potential_mods: Vec::new(), // inserting dummy values here since they won't be used
         decoy_tag: config.decoy_tag,
     }
+}
+
+/// Local sort+dedup that mirrors `Parameters::reorder_peptides`.
+fn sort_and_dedup(peptides: &mut Vec<Peptide>) {
+    peptides.par_sort_unstable_by(|a, b| {
+        a.monoisotopic
+            .total_cmp(&b.monoisotopic)
+            .then_with(|| a.initial_sort(b))
+    });
+
+    peptides.dedup_by(|remove, keep| {
+        if remove.monoisotopic == keep.monoisotopic
+            && remove.sequence == keep.sequence
+            && remove.modifications == keep.modifications
+            && remove.nterm == keep.nterm
+            && remove.cterm == keep.cterm
+        {
+            keep.proteins.extend(remove.proteins.iter().cloned());
+            // if any source was target, the merged stays target
+            keep.decoy &= remove.decoy;
+            true
+        } else {
+            false
+        }
+    });
+
+    peptides
+        .par_iter_mut()
+        .for_each(|p| p.proteins.sort_unstable());
 }

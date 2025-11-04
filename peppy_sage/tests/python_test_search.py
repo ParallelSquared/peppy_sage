@@ -19,7 +19,7 @@ def test_database_build():
         bucket_size=128,
         ion_kinds=["b", "y"],
         min_ion_index=0,
-        generate_decoys=False,
+        generate_decoys=True,
         decoy_tag="rev_",
         peptide_min_mass=0.0,
         peptide_max_mass=1500.0,

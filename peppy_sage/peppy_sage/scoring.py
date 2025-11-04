@@ -47,11 +47,6 @@ class Scorer:
         """
         features = self._scorer.score_spectra(db._inner, spectrum._inner)
 
-        # Wrap Rust peptides with Python Peptide
-        for feat in features:
-            if feat.peptide is not None:
-                feat.peptide = Peptide.from_rust(feat.peptide)
-
         return features
 
     def score_many(self, db, spectra):
@@ -60,10 +55,5 @@ class Scorer:
         """
         rust_spectra = [s._inner for s in spectra]
         all_hits = self._scorer.score_many_spectra(db._inner, rust_spectra)
-
-        for group in all_hits:
-            for feat in group:
-                if feat.peptide is not None:
-                    feat.peptide = Peptide.from_rust(feat.peptide)
 
         return all_hits
