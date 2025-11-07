@@ -25,6 +25,7 @@ def test_database_build():
         peptide_max_mass=1500.0,
     )
 
+
     print("Peptide count:", len(db.peptides))
     for p in db.peptides:
         print("  →", p.sequence)
@@ -42,7 +43,7 @@ def test_spectrum_build():
     print("\n--- Spectrum Build ---")
 
     # 1. Precursor setup
-    precursor = Precursor(mz=310.15896, charge=3, isolation_window=(1.5, 1.5))
+    precursor = Precursor(mz=310.15896, charge=0, isolation_window=(-1.5, 1.5))
 
     # 2. Peak data
     proton_mass = 1.0072764
@@ -83,22 +84,26 @@ def test_scoring(db, spectrum):
         chimera=False
     )
 
+    scorer = ps.Scorer(
+        precursor_tol_da=(-1,1), # TODO placeholder
+        fragment_tol_ppm=(-10,10),
+        min_isotope_err=0,
+        max_isotope_err=0,
+        wide_window=True,
+        chimera=False,
+        annotate_matches=True,
+        report_psms=10
+    )
+
     features = scorer.score(db, spectrum)
     print(f"Total features returned: {len(features)}")
 
-    for f in features:
-        print("1")
+    for i, f in enumerate(features):
+        print("***")
         print(f)
-        print(f.to_dict)
-        print(f.to_dict())
-
-    for f in features:
-        print(f.peptide.calculate_theoretical_mz(1))
         d = f.to_dict()
         print(d)
-        print(d['sequence'])
-        print(d['modifications'])
-
+        print(d['hyperscore'])
 
 if __name__ == "__main__":
     db = test_database_build()
