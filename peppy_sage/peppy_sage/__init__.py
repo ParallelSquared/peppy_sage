@@ -33,3 +33,11 @@ __all__ = [
     "Precursor",
     "Scorer",
 ]
+
+from importlib.metadata import version, PackageNotFoundError
+
+try:
+    __version__ = version("peppy_sage")
+except PackageNotFoundError:
+    # Package is not installed (e.g. running from source tree)
+    __version__ = "0.0.0"
