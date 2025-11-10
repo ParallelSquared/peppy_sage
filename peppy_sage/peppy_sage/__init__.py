@@ -2,7 +2,7 @@
 
 # Import the compiled PyO3 extension module
 # (the same name as your PyO3 crate, built by maturin)
-from .peppy_sage import (
+from _peppy_sage import (
     PyPeptide,
     PyIndexedDatabase,
     PyProcessedSpectrum,

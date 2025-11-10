@@ -971,7 +971,7 @@ fn hello_py() -> PyResult<&'static str> {
 }
 
 #[pymodule]
-fn peppy_sage(py: Python, m: Bound<'_, PyModule>) -> PyResult<()> {
+fn _peppy_sage(py: Python, m: Bound<'_, PyModule>) -> PyResult<()> {
     // Register ALL classes used for I/O and configuration
     m.add_class::<PyIndexedDatabase>()?;
     m.add_class::<PyPeptide>()?;

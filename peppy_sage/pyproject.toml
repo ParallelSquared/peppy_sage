@@ -4,11 +4,11 @@ build-backend = "maturin"
 
 [project]
 name = "peppy_sage"
-version = "0.1.0"
+version = "0.1.1"
 description = "Hybrid Rust/Python peptide scoring library"
 authors = [{ name = "Daniel Geiszler" }]
 license = { text = "MIT" }
-requires-python = ">=3.8"
+requires-python = ">=3.11"
 classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Rust",
@@ -17,5 +17,5 @@ classifiers = [
 
 [tool.maturin]
 bindings = "pyo3"
-module-name = "peppy_sage.peppy_sage"  # since your .so is inside that subpackage
+module-name = "peppy_sage._peppy_sage"  # since your .so is inside that subpackage
 python-source = "peppy_sage"           # where your .py files live
