@@ -1,8 +1,7 @@
 from typing import List, Optional, Tuple, Union
 import numpy as np
 from pyteomics import mass
-import peppy_sage as _rust  # your compiled PyO3 module
-
+from . import _rust
 
 PROTON_MASS = 1.0072764
 

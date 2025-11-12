@@ -1,10 +1,10 @@
 [package]
 name = "peppy_sage"
-version = "0.1.0"
+version = "0.1.2"
 edition = "2024"
 
 [lib]
-name = "peppy_sage"
+name = "_peppy_sage"
 crate-type = ["cdylib"]
 
 [dependencies]

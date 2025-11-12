@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "peppy_sage"
-version = "0.1.1"
+version = "0.1.2"
 description = "Hybrid Rust/Python peptide scoring library"
 authors = [{ name = "Daniel Geiszler" }]
 license = { text = "MIT" }
@@ -17,5 +17,7 @@ classifiers = [
 
 [tool.maturin]
 bindings = "pyo3"
-module-name = "peppy_sage._peppy_sage"  # since your .so is inside that subpackage
-python-source = "peppy_sage"           # where your .py files live
+# Tells Maturin where to find the high-level Python files:
+python-source = "python"
+# Explicitly tells Maturin the compiled file goes inside the peppy_sage package:
+module-name = "peppy_sage._peppy_sage"

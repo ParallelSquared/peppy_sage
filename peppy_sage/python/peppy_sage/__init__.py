@@ -2,7 +2,7 @@
 
 # Import the compiled PyO3 extension module
 # (the same name as your PyO3 crate, built by maturin)
-from _peppy_sage import (
+from ._peppy_sage import (
     PyPeptide,
     PyIndexedDatabase,
     PyProcessedSpectrum,
@@ -11,6 +11,18 @@ from _peppy_sage import (
     PyPrecursor,
     PyKind,
 )
+
+# Define the _rust alias here for internal use by other modules.
+# This makes it accessible via 'from . import _rust' in other package files.
+_rust = type('RustBindings', (object,), {
+    'PyPeptide': PyPeptide,
+    'PyIndexedDatabase': PyIndexedDatabase,
+    'PyProcessedSpectrum': PyProcessedSpectrum,
+    'PyScorer': PyScorer,
+    'PyTolerance': PyTolerance,
+    'PyPrecursor': PyPrecursor,
+    'PyKind': PyKind,
+})
 
 # Import the high-level Python wrappers
 from .core import Peptide, Spectrum, Precursor

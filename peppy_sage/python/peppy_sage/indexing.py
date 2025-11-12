@@ -1,8 +1,8 @@
 # indexed_database.py
 
-from . import peppy_sage as _rust  # your compiled PyO3 module
 from typing import List, Optional, Tuple, Union
 from .core import Peptide
+from . import _rust
 
 ION_KIND_MAP = {
     #"a": _rust.PyKind.A, #TODO other ion types

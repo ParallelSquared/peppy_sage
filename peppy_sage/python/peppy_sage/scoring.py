@@ -1,4 +1,5 @@
-from peppy_sage import PyScorer, PyTolerance, Peptide
+from . import _rust
+from . import Peptide
 
 class Scorer:
     """
@@ -22,10 +23,10 @@ class Scorer:
             max_fragment_charge: int = 1,
     ):
         """Initialize the high-level scoring object."""
-        precursor_tol = PyTolerance.Da(*precursor_tol_da)
-        fragment_tol = PyTolerance.Ppm(*fragment_tol_ppm)
+        precursor_tol = _rust.PyTolerance.Da(*precursor_tol_da)
+        fragment_tol = _rust.PyTolerance.Ppm(*fragment_tol_ppm)
 
-        self._scorer = PyScorer(
+        self._scorer = _rust.PyScorer(
             precursor_tol,
             fragment_tol,
             wide_window,
