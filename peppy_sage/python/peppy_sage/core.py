@@ -190,7 +190,7 @@ class Peptide:
         self.monoisotopic_mass += sum(mods)
 
         # --- Create the Rust-side PyPeptide object ---
-        self._inner = _rust.PyPeptide(sequence, self.monoisotopic_mass, mods, mods[0], mods[-1])
+        self._inner = _rust.PyPeptide(sequence, self.monoisotopic_mass, mods[1:-1], mods[0], mods[-1])
 
     @classmethod
     def from_rust(cls, rust_peptide: _rust.PyPeptide) -> "Peptide":
