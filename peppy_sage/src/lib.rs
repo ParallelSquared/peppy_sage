@@ -378,7 +378,36 @@ impl PyPeptide {
 
     #[getter]
     pub fn modifications(&self) -> PyResult<Vec<f32>> {
-        Ok(self.inner.modifications.clone())
+        Ok(self.mod_array())
+    }
+
+    /// Return combined mod array in the convention: [N-term, per-res..., C-term]
+    #[getter]
+    pub fn mod_array(&self) -> Vec<f32> {
+        let n = self.inner.nterm.unwrap_or(0.0);
+        let c = self.inner.cterm.unwrap_or(0.0);
+        let mut out = Vec::with_capacity(self.inner.modifications.len() + 2);
+        out.push(n);
+        out.extend_from_slice(&self.inner.modifications);
+        out.push(c);
+        out
+    }
+
+    /// Accept a combined mod array [N-term, per-res..., C-term] and split it
+    #[setter]
+    pub fn set_mod_array(&mut self, mods: Vec<f32>) -> PyResult<()> {
+        let seq_len = self.inner.modifications.len();
+        if mods.len() != seq_len + 2 {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "mod_array length {} must equal sequence length + 2 (= {})",
+                mods.len(),
+                seq_len + 2
+            )));
+        }
+        self.inner.nterm = Some(mods[0]);
+        self.inner.modifications.copy_from_slice(&mods[1..(1 + seq_len)]);
+        self.inner.cterm = Some(mods[seq_len + 1]);
+        Ok(())
     }
 }
 
@@ -396,8 +425,6 @@ impl PyKind {
     pub fn Y() -> Self {
         Self { inner: Kind::Y }
     }
-
-    // Add other necessary getters/methods here if needed. TODO
 }
 
 // And your other impl blocks (impl PyPeptide, impl PyKind, etc.)
@@ -480,7 +507,7 @@ impl PyFeature {
 
     #[getter]
     pub fn modifications(&self) -> Option<Vec<f32>> {
-        self.peptide.as_ref().map(|p| p.inner.modifications.clone())
+        self.peptide.as_ref().map(|p| p.mod_array())
     }
 
     #[getter]
@@ -678,7 +705,7 @@ impl PyFeature {
         let (seq, mods) = if let Some(p) = &self.peptide {
             (
                 String::from_utf8_lossy(&p.inner.sequence).into_owned(),
-                format!("{:?}", p.inner.modifications),
+                format!("{:?}", p.mod_array()),
             )
         } else {
             ("<None>".to_string(), "<None>".to_string())
@@ -709,7 +736,7 @@ impl PyFeature {
         d.set_item("rank", self.inner.rank)?;
         if let Some(p) = &self.peptide {
             d.set_item("sequence", String::from_utf8_lossy(&p.inner.sequence).into_owned())?;
-            d.set_item("modifications", p.inner.modifications.clone())?;
+            d.set_item("modifications", p.mod_array())?;
         } else {
             d.set_item("sequence", py.None())?;
             d.set_item("modifications", py.None())?;
