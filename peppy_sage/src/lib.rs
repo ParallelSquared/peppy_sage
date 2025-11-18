@@ -91,6 +91,230 @@ pub struct PyFeature {
     pub peptide: Option<PyPeptide>,
 }
 
+/// A columnar representation of many PyFeature objects, optimized for zero-copy
+/// transfer to Python's data analysis libraries (e.g., Polars or Pandas).
+#[pyclass]
+#[derive(Default, Clone, Debug)]
+pub struct PyFeatureArrays {
+    // Basic identifiers
+    #[pyo3(get)]
+    pub file_id: Vec<usize>,
+    #[pyo3(get)]
+    pub spec_id: Vec<String>,
+    #[pyo3(get)]
+    pub psm_id: Vec<usize>,
+    #[pyo3(get)]
+    pub rank: Vec<u32>,
+
+    // Peptide info (extracted)
+    #[pyo3(get)]
+    pub sequence: Vec<String>,
+    // Modifications are complex (list of floats). Using a list of lists (Vec<Vec<f32>>)
+    // is the most direct way to transfer this, though Polars might prefer
+    // to map this column to a List<Float32> type.
+    #[pyo3(get)]
+    pub modifications: Vec<Vec<f32>>,
+    #[pyo3(get)]
+    pub peptide_len: Vec<usize>,
+    #[pyo3(get)]
+    pub missed_cleavages: Vec<u8>,
+
+    // Mass and error metrics
+    #[pyo3(get)]
+    pub expmass: Vec<f32>,
+    #[pyo3(get)]
+    pub calcmass: Vec<f32>,
+    #[pyo3(get)]
+    pub charge: Vec<u8>,
+    #[pyo3(get)]
+    pub delta_mass: Vec<f32>,
+    #[pyo3(get)]
+    pub isotope_error: Vec<f32>,
+    #[pyo3(get)]
+    pub average_ppm: Vec<f32>,
+
+    // Score metrics
+    #[pyo3(get)]
+    pub hyperscore: Vec<f64>,
+    #[pyo3(get)]
+    pub delta_next: Vec<f64>,
+    #[pyo3(get)]
+    pub delta_best: Vec<f64>,
+    #[pyo3(get)]
+    pub poisson: Vec<f64>,
+    #[pyo3(get)]
+    pub discriminant_score: Vec<f32>,
+
+    // Spectrum matching metrics
+    #[pyo3(get)]
+    pub matched_peaks: Vec<u32>,
+    #[pyo3(get)]
+    pub matched_intensity_pct: Vec<f32>,
+    #[pyo3(get)]
+    pub longest_b: Vec<u32>,
+    #[pyo3(get)]
+    pub longest_y: Vec<u32>,
+    #[pyo3(get)]
+    pub longest_y_pct: Vec<f32>,
+    #[pyo3(get)]
+    pub scored_candidates: Vec<u32>,
+    #[pyo3(get)]
+    pub ms2_intensity: Vec<f32>,
+
+    // RT/IMS metrics
+    #[pyo3(get)]
+    pub rt: Vec<f32>,
+    #[pyo3(get)]
+    pub aligned_rt: Vec<f32>,
+    #[pyo3(get)]
+    pub predicted_rt: Vec<f32>,
+    #[pyo3(get)]
+    pub delta_rt_model: Vec<f32>,
+    #[pyo3(get)]
+    pub ims: Vec<f32>,
+    #[pyo3(get)]
+    pub predicted_ims: Vec<f32>,
+    #[pyo3(get)]
+    pub delta_ims_model: Vec<f32>,
+
+    // Q-values and label
+    #[pyo3(get)]
+    pub label: Vec<i32>,
+    #[pyo3(get)]
+    pub spectrum_q: Vec<f32>,
+    #[pyo3(get)]
+    pub peptide_q: Vec<f32>,
+    #[pyo3(get)]
+    pub protein_q: Vec<f32>,
+    #[pyo3(get)]
+    pub posterior_error: Vec<f32>,
+}
+
+/// Iterates over the raw features, looks up the associated Peptide data,
+/// and collects all fields into columnar vectors.
+fn features_to_arrays(
+    // The result of score_many_spectra, flattened from Vec<Vec<Feature>> to Vec<Feature>
+    all_features: Vec<Feature>,
+    db_arc: Arc<IndexedDatabase>,
+) -> PyFeatureArrays {
+    let mut arrays = PyFeatureArrays::default();
+    let total_features = all_features.len();
+
+    // We reserve capacity up front for better performance (all 38 fields)
+    arrays.file_id.reserve(total_features);
+    arrays.spec_id.reserve(total_features);
+    arrays.psm_id.reserve(total_features);
+    arrays.rank.reserve(total_features);
+    arrays.sequence.reserve(total_features);
+    arrays.modifications.reserve(total_features);
+    arrays.peptide_len.reserve(total_features);
+    arrays.missed_cleavages.reserve(total_features);
+    arrays.expmass.reserve(total_features);
+    arrays.calcmass.reserve(total_features);
+    arrays.charge.reserve(total_features);
+    arrays.delta_mass.reserve(total_features);
+    arrays.isotope_error.reserve(total_features);
+    arrays.average_ppm.reserve(total_features);
+    arrays.hyperscore.reserve(total_features);
+    arrays.delta_next.reserve(total_features);
+    arrays.delta_best.reserve(total_features);
+    arrays.poisson.reserve(total_features);
+    arrays.discriminant_score.reserve(total_features);
+    arrays.matched_peaks.reserve(total_features);
+    arrays.matched_intensity_pct.reserve(total_features);
+    arrays.longest_b.reserve(total_features);
+    arrays.longest_y.reserve(total_features);
+    arrays.longest_y_pct.reserve(total_features);
+    arrays.scored_candidates.reserve(total_features);
+    arrays.ms2_intensity.reserve(total_features);
+    arrays.rt.reserve(total_features);
+    arrays.aligned_rt.reserve(total_features);
+    arrays.predicted_rt.reserve(total_features);
+    arrays.delta_rt_model.reserve(total_features);
+    arrays.ims.reserve(total_features);
+    arrays.predicted_ims.reserve(total_features);
+    arrays.delta_ims_model.reserve(total_features);
+    arrays.label.reserve(total_features);
+    arrays.spectrum_q.reserve(total_features);
+    arrays.peptide_q.reserve(total_features);
+    arrays.protein_q.reserve(total_features);
+    arrays.posterior_error.reserve(total_features);
+
+
+    // Iterate through the features and extract data
+    for feat in all_features.into_iter() {
+        // Fetch the associated Peptide object from the database once
+        let pep = peptide_by_idx(&*db_arc, &feat.peptide_idx);
+
+        // --- Basic Identifiers ---
+        arrays.file_id.push(feat.file_id);
+        arrays.spec_id.push(feat.spec_id);
+        arrays.psm_id.push(feat.psm_id);
+        arrays.rank.push(feat.rank);
+
+        // --- Peptide Info ---
+        if let Some(p) = pep {
+            arrays.peptide_len.push(p.inner.sequence.len());
+            arrays.missed_cleavages.push(feat.missed_cleavages);
+
+            // Sequence
+            arrays.sequence.push(String::from_utf8_lossy(&p.inner.sequence).into_owned());
+
+            // Modifications: Assuming the underlying Peptide struct has a method
+            // equivalent to PyPeptide::mod_array() (e.g., `p.mod_array()`)
+            // that returns the N-term, residue, and C-term mods as Vec<f32>.
+            arrays.modifications.push(p.mod_array());
+        } else {
+            // Handle features without an associated peptide
+            arrays.peptide_len.push(0);
+            arrays.missed_cleavages.push(0);
+            arrays.sequence.push(String::new());
+            arrays.modifications.push(vec![]);
+        }
+
+        // --- Mass and error metrics ---
+        arrays.expmass.push(feat.expmass);
+        arrays.calcmass.push(feat.calcmass);
+        arrays.charge.push(feat.charge);
+        arrays.delta_mass.push(feat.delta_mass);
+        arrays.isotope_error.push(feat.isotope_error);
+        arrays.average_ppm.push(feat.average_ppm);
+
+        // --- Score metrics ---
+        arrays.hyperscore.push(feat.hyperscore);
+        arrays.delta_next.push(feat.delta_next);
+        arrays.delta_best.push(feat.delta_best);
+        arrays.poisson.push(feat.poisson);
+        arrays.discriminant_score.push(feat.discriminant_score);
+
+        // --- Spectrum matching metrics ---
+        arrays.matched_peaks.push(feat.matched_peaks);
+        arrays.matched_intensity_pct.push(feat.matched_intensity_pct);
+        arrays.longest_b.push(feat.longest_b);
+        arrays.longest_y.push(feat.longest_y);
+        arrays.longest_y_pct.push(feat.longest_y_pct);
+        arrays.scored_candidates.push(feat.scored_candidates);
+        arrays.ms2_intensity.push(feat.ms2_intensity);
+
+        // --- RT/IMS metrics ---
+        arrays.rt.push(feat.rt);
+        arrays.aligned_rt.push(feat.aligned_rt);
+        arrays.predicted_rt.push(feat.predicted_rt);
+        arrays.delta_rt_model.push(feat.delta_rt_model);
+        arrays.ims.push(feat.ims);
+        arrays.predicted_ims.push(feat.predicted_ims);
+        arrays.delta_ims_model.push(feat.delta_ims_model);
+
+        // --- Q-values and label ---
+        arrays.label.push(feat.label);
+        arrays.spectrum_q.push(feat.spectrum_q);
+        arrays.peptide_q.push(feat.peptide_q);
+        arrays.protein_q.push(feat.protein_q);
+        arrays.posterior_error.push(feat.posterior_error);
+    }
+
+    arrays
+}
 
 // --- 2. IMPLEMENT METHODS FOR WRAPPER STRUCTS ---
 
@@ -247,7 +471,7 @@ impl PyScorer {
         py: pyo3::Python<'_>,
         db: &PyIndexedDatabase,
         spectra: Vec<Py<PyProcessedSpectrum>>,   // <— faster extraction
-    ) -> PyResult<Vec<Vec<PyFeature>>> {
+    ) -> PyResult<PyFeatureArrays> {
         //let guard = ProfilerGuard::new(100).ok(); // 100 Hz sampler
 
         // 1) Snapshot Rust-owned data while holding the GIL
@@ -281,25 +505,19 @@ impl PyScorer {
             }
         });
 
-        /*
-        if let Some(g) = guard {
-            if let Ok(report) = g.report().build() {
-                if let Ok(file) = File::create("peppy_sage_score_many.svg") {
-                    let _ = report.flamegraph(file);
-                }
-            }
-        }
-        */
-
-        Ok(results
+        // The first flat_map flattens the results from Vec<Vec<Feature>> to Vec<Feature>
+        let all_features: Vec<Feature> = results
             .into_iter()
-            .map(|v| v.into_iter().map(|f| {
-                let pep = peptide_by_idx(&*db_arc, &f.peptide_idx);
-                PyFeature { inner: f, peptide: pep }
-            }).collect())
-            .collect())
-    }
+            .flat_map(|v| v.into_iter())
+            .collect();
 
+        // Perform the final data extraction and formatting, all in fast Rust code
+        let feature_arrays = py.allow_threads(|| {
+            features_to_arrays(all_features, db_arc)
+        });
+
+        Ok(feature_arrays)
+    }
 
     /// Executes the scoring logic against the built database and a single spectrum.
     pub fn score_spectra(
@@ -782,6 +1000,116 @@ impl PyFeature {
         }
 
         Ok(d.into())
+    }
+}
+
+#[pymethods]
+impl PyFeatureArrays {
+    /// Extends this PyFeatureArrays object with the contents of another,
+    /// performing the vector concatenation efficiently in Rust.
+    pub fn extend(&mut self, other: PyFeatureArrays) {
+        self.file_id.extend(other.file_id);
+        self.spec_id.extend(other.spec_id);
+        self.psm_id.extend(other.psm_id);
+        self.rank.extend(other.rank);
+
+        // Peptide info
+        self.sequence.extend(other.sequence);
+        self.modifications.extend(other.modifications);
+        self.peptide_len.extend(other.peptide_len);
+        self.missed_cleavages.extend(other.missed_cleavages);
+
+        // Mass and error metrics
+        self.expmass.extend(other.expmass);
+        self.calcmass.extend(other.calcmass);
+        self.charge.extend(other.charge);
+        self.delta_mass.extend(other.delta_mass);
+        self.isotope_error.extend(other.isotope_error);
+        self.average_ppm.extend(other.average_ppm);
+
+        // Score metrics
+        self.hyperscore.extend(other.hyperscore);
+        self.delta_next.extend(other.delta_next);
+        self.delta_best.extend(other.delta_best);
+        self.poisson.extend(other.poisson);
+        self.discriminant_score.extend(other.discriminant_score);
+
+        // Spectrum matching metrics
+        self.matched_peaks.extend(other.matched_peaks);
+        self.matched_intensity_pct.extend(other.matched_intensity_pct);
+        self.longest_b.extend(other.longest_b);
+        self.longest_y.extend(other.longest_y);
+        self.longest_y_pct.extend(other.longest_y_pct);
+        self.scored_candidates.extend(other.scored_candidates);
+        self.ms2_intensity.extend(other.ms2_intensity);
+
+        // RT/IMS metrics
+        self.rt.extend(other.rt);
+        self.aligned_rt.extend(other.aligned_rt);
+        self.predicted_rt.extend(other.predicted_rt);
+        self.delta_rt_model.extend(other.delta_rt_model);
+        self.ims.extend(other.ims);
+        self.predicted_ims.extend(other.predicted_ims);
+        self.delta_ims_model.extend(other.delta_ims_model);
+
+        // Q-values and label
+        self.label.extend(other.label);
+        self.spectrum_q.extend(other.spectrum_q);
+        self.peptide_q.extend(other.peptide_q);
+        self.protein_q.extend(other.protein_q);
+        self.posterior_error.extend(other.posterior_error);
+    }
+
+    /// Provides a debugging representation for the Python object.
+    pub fn __repr__(&self) -> PyResult<String> {
+        let n = self.file_id.len();
+        let sample_size = n.min(3);
+
+        let seq_sample: Vec<String> = self.sequence.iter().take(sample_size).cloned().collect();
+        let score_sample: Vec<f64> = self.hyperscore.iter().take(sample_size).copied().collect();
+        let charge_sample: Vec<u8> = self.charge.iter().take(sample_size).copied().collect();
+
+        Ok(format!(
+            "PyFeatureArrays(\n\
+             \tFeatures: {n},\n\
+             \tSample Sequence: {:?},\n\
+             \tSample Hyperscore: {:?},\n\
+             \tSample Charge: {:?}\n\
+             )",
+            seq_sample,
+            score_sample,
+            charge_sample,
+        ))
+    }
+
+    /// Returns a list of all column names (field names) available in this struct.
+    pub fn get_column_names(&self) -> Vec<String> {
+        let debug_string = format!("{:?}", self);
+        // This is a common trick: the Debug output for a struct lists all field names.
+        // We parse this string to get the names.
+
+        let struct_name = "PyFeatureArrays {";
+        if let Some(start) = debug_string.find(struct_name) {
+            let fields_string = &debug_string[start + struct_name.len()..];
+            let mut names = Vec::new();
+
+            for field in fields_string.split(", ") {
+                if let Some(name_end) = field.find(':') {
+                    let name = field[..name_end].trim().to_string();
+                    if !name.is_empty() {
+                        names.push(name);
+                    }
+                }
+            }
+            // Remove the trailing '}' from the last field name if present
+            if let Some(last) = names.last_mut() {
+                if last.ends_with('}') {
+                    last.pop();
+                }
+            }
+            return names;
+        }
+        Vec::new()
     }
 }
 

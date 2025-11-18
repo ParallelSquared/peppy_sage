@@ -100,15 +100,30 @@ def test_scoring(db, spectrum):
         report_psms=1
     )
 
-    features = scorer.score(db, spectrum)
-    print(f"Total features returned: {len(features)}")
+    spectra = [spectrum]
 
-    for i, f in enumerate(features):
-        print("***")
-        print(f)
-        d = f.to_dict()
-        print(d)
-        print(d['hyperscore'])
+    BATCH_SIZE = 10000
+    feature_arrays = None # Start with None or PyFeatureArrays()
+
+    for i in range(0, len(spectra), BATCH_SIZE):
+        batch_spectra = spectra[i:i + BATCH_SIZE]
+
+        # 1. Get the columnar results for the current batch
+        batch_arrays = scorer.score_many(db, batch_spectra)
+
+        if feature_arrays is None:
+            # Initialize the total container with the first batch
+            feature_arrays = batch_arrays
+        else:
+            # 2. Append the new batch's data using the highly efficient Rust-side extend
+            feature_arrays.extend(batch_arrays)
+
+    import pandas as pd
+
+    col_names = feature_arrays.get_column_names()
+    df = pd.DataFrame({name: getattr(feature_arrays, name) for name in col_names})
+
+    print(df)
 
 if __name__ == "__main__":
     db = test_database_build()
