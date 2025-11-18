@@ -484,7 +484,7 @@ impl PyScorer {
         let cfg = self.config.clone();             // cheap struct clone
 
         // 2) Build a custom Rayon thread pool if requested
-        let mut num_threads = Some(32); //TODO
+        let mut num_threads = None; //TODO this should be a parameter
         let results = py.allow_threads(|| {
             if let Some(n_threads) = num_threads {
                 ThreadPoolBuilder::new()
