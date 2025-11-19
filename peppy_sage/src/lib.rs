@@ -188,6 +188,20 @@ pub struct PyFeatureArrays {
     pub protein_q: Vec<f32>,
     #[pyo3(get)]
     pub posterior_error: Vec<f32>,
+
+    //Fragment-level metrics (one list per feature)
+    #[pyo3(get)]
+    pub frag_charges: Vec<Vec<i32>>,
+    #[pyo3(get)]
+    pub frag_kinds: Vec<Vec<String>>,
+    #[pyo3(get)]
+    pub frag_fragment_ordinals: Vec<Vec<i32>>,
+    #[pyo3(get)]
+    pub frag_intensities: Vec<Vec<f32>>,
+    #[pyo3(get)]
+    pub frag_mz_calculated: Vec<Vec<f32>>,
+    #[pyo3(get)]
+    pub frag_mz_experimental: Vec<Vec<f32>>,
 }
 
 /// Iterates over the raw features, looks up the associated Peptide data,
@@ -239,6 +253,12 @@ fn features_to_arrays(
     arrays.peptide_q.reserve(total_features);
     arrays.protein_q.reserve(total_features);
     arrays.posterior_error.reserve(total_features);
+    arrays.frag_charges.reserve(total_features);
+    arrays.frag_kinds.reserve(total_features);
+    arrays.frag_fragment_ordinals.reserve(total_features);
+    arrays.frag_intensities.reserve(total_features);
+    arrays.frag_mz_calculated.reserve(total_features);
+    arrays.frag_mz_experimental.reserve(total_features);
 
 
     // Iterate through the features and extract data
@@ -311,6 +331,30 @@ fn features_to_arrays(
         arrays.peptide_q.push(feat.peptide_q);
         arrays.protein_q.push(feat.protein_q);
         arrays.posterior_error.push(feat.posterior_error);
+
+        //--- Fragments ---
+        if let Some(ref frags) = feat.fragments {
+            // charges: Vec<i32>
+            arrays.frag_charges.push(frags.charges.clone());
+
+            // kinds: convert Kind enum -> String, same as PyFragments::kinds()
+            arrays.frag_kinds.push(
+                frags.kinds.iter().map(|k| format!("{:?}", k)).collect()
+            );
+
+            arrays.frag_fragment_ordinals.push(frags.fragment_ordinals.clone());
+            arrays.frag_intensities.push(frags.intensities.clone());
+            arrays.frag_mz_calculated.push(frags.mz_calculated.clone());
+            arrays.frag_mz_experimental.push(frags.mz_experimental.clone());
+        } else {
+            // No fragments: store empty lists so the column lengths still match
+            arrays.frag_charges.push(Vec::new());
+            arrays.frag_kinds.push(Vec::new());
+            arrays.frag_fragment_ordinals.push(Vec::new());
+            arrays.frag_intensities.push(Vec::new());
+            arrays.frag_mz_calculated.push(Vec::new());
+            arrays.frag_mz_experimental.push(Vec::new());
+        }
     }
 
     arrays
@@ -1058,6 +1102,14 @@ impl PyFeatureArrays {
         self.peptide_q.extend(other.peptide_q);
         self.protein_q.extend(other.protein_q);
         self.posterior_error.extend(other.posterior_error);
+
+        // Fragment columns
+        self.frag_charges.extend(other.frag_charges);
+        self.frag_kinds.extend(other.frag_kinds);
+        self.frag_fragment_ordinals.extend(other.frag_fragment_ordinals);
+        self.frag_intensities.extend(other.frag_intensities);
+        self.frag_mz_calculated.extend(other.frag_mz_calculated);
+        self.frag_mz_experimental.extend(other.frag_mz_experimental);
     }
 
     /// Provides a debugging representation for the Python object.

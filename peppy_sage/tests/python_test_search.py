@@ -121,9 +121,10 @@ def test_scoring(db, spectrum):
     import pandas as pd
 
     col_names = feature_arrays.get_column_names()
+    print(feature_arrays.frag_intensities)
     df = pd.DataFrame({name: getattr(feature_arrays, name) for name in col_names})
 
-    print(df)
+    print(df.loc[0, 'frag_intensities'])
 
 if __name__ == "__main__":
     db = test_database_build()
