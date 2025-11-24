@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 pub enum ScoreType {
     SageHyperScore,
     OpenMSHyperScore,
+    MatchedFrags
 }
 
 /// Structure to hold temporary scores
@@ -185,6 +186,11 @@ impl ScoreType {
             Self::OpenMSHyperScore => {
                 let summed_intensity = summed_b + summed_y;
                 let score = summed_intensity.ln_1p() as f64 + lnfact(matched_b) + lnfact(matched_y);
+                score
+            }
+            // Calculate the OpenMS flavour hyperscore
+            Self::MatchedFrags => {
+                let score = lnfact(matched_b) + lnfact(matched_y);
                 score
             }
         };
