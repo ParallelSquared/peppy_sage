@@ -500,7 +500,7 @@ impl PyScorer {
                 max_isotope_err,
                 min_precursor_charge,
                 max_precursor_charge,
-                score_type: ScoreType::MatchedFrags,
+                score_type: ScoreType::SageHyperScore,
 
                 // Defaults for native Scorer fields
                 override_precursor_charge: false, // May need to change these defaults TODO
