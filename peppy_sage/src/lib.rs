@@ -4,12 +4,12 @@
 pub mod index_logic;
 pub mod scoring_logic;
 
-use crate::index_logic::{build_indexed_database, IndexingConfig};
+use crate::index_logic::{build_indexed_database, build_indexed_database_from_library, IndexingConfig};
 use crate::scoring_logic::{ScorerConfig, run_scoring};
 
 // --- CORE AND PY03 IMPORTS ---
 use pyo3::prelude::*;
-use pyo3::exceptions::PyRuntimeError;
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::types::PyString;
 use pyo3::types::PyDict;
 use pyo3::buffer::PyBuffer;
@@ -17,6 +17,8 @@ use pyo3::types::PyAny;
 use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
 use std::sync::Arc;
+use pyo3_polars::PyDataFrame;
+use polars_core::frame::DataFrame;
 
 use std::fs::File;
 
@@ -34,6 +36,10 @@ use sage_core::modification::ModificationSpecificity;
 // --- 1. DEFINE WRAPPER STRUCTS ---
 
 // Define PyPeptide, PyKind, PyModificationSpecificity, etc., first.
+#[pyclass(module = "peppy_sage")]
+pub struct PyLibrary {
+    df: DataFrame,
+}
 
 #[pyclass(module = "peppy_sage")]
 pub struct PyIndexedDatabase {
@@ -364,6 +370,23 @@ fn features_to_arrays(
 
 // Now that the struct is defined, you can write the methods.
 #[pymethods]
+impl PyLibrary {
+    #[new]
+    pub fn new(df: &PyAny) -> PyResult<Self> {
+        // Python Polars DataFrame -> PyDataFrame
+        let py_df: PyDataFrame = df.extract()?;
+
+        // This is &polars_core::frame::DataFrame, which now matches our `DataFrame` alias
+        let df_ref: &DataFrame = py_df.as_ref();
+
+        // Cheap clone: just bumps Arc refs internally, no data copy
+        let df = df_ref.clone();
+
+        Ok(Self { df })
+    }
+}
+
+#[pymethods]
 impl PyIndexedDatabase {
     // ... all your static methods, getters, and other methods go here ...
 
@@ -419,6 +442,57 @@ impl PyIndexedDatabase {
             Ok(db) => Ok(PyIndexedDatabase { inner: Arc::new(db) }), // ✅ wrap once here
             Err(_) => Err(PyRuntimeError::new_err(
                 "Rust panic occurred during indexed database generation.",
+            )),
+        }
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (
+        library_df,
+        bucket_size,
+        ion_kinds,
+        min_ion_index,
+        generate_decoys,
+        decoy_tag,
+        peptide_min_mass,
+        peptide_max_mass,
+    ))]
+    pub fn from_library_and_config(
+        library_df: PyDataFrame,
+        bucket_size: usize,
+        ion_kinds: Vec<PyKind>,
+        min_ion_index: usize,
+        generate_decoys: bool,
+        decoy_tag: String,
+        peptide_min_mass: f32,
+        peptide_max_mass: f32,
+    ) -> PyResult<Self> {
+        // 1. Zero-copy convert PyDataFrame → polars::DataFrame
+        let df: DataFrame = library_df.into();
+
+        // 2. Convert PyKind wrappers to native Kind enum
+        let native_ion_kinds: Vec<Kind> = ion_kinds.into_iter().map(|k| k.inner).collect();
+
+        // 3. Build indexing config (parallel to from_peptides_and_config)
+        let config = IndexingConfig {
+            bucket_size,
+            ion_kinds: native_ion_kinds,
+            min_ion_index,
+            generate_decoys,
+            decoy_tag,
+            peptide_min_mass,
+            peptide_max_mass,
+        };
+
+        // 4. Call core Rust logic, catching panics like the peptide version
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            build_indexed_database_from_library(config, df)
+        }));
+
+        match result {
+            Ok(db) => Ok(PyIndexedDatabase { inner: Arc::new(db) }),
+            Err(_) => Err(PyRuntimeError::new_err(
+                "Rust panic occurred during indexed database generation from library.",
             )),
         }
     }

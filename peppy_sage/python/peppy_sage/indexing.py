@@ -3,6 +3,7 @@
 from typing import List, Optional, Tuple, Union
 from .core import Peptide
 from . import _rust
+import polars as pl
 
 ION_KIND_MAP = {
     #"a": _rust.PyKind.A, #TODO other ion types
@@ -92,6 +93,58 @@ class IndexedDatabase:
         )
 
         return cls(inner)
+
+
+    @classmethod
+    def from_library(
+            cls,
+            library: pl.DataFrame,
+            ion_kinds: List[str],
+            bucket_size: int = 8192,
+            min_ion_index: int = 1,
+            generate_decoys: bool = False,
+            decoy_tag: str = "rev_",
+            peptide_min_mass: float = 500.0,
+            peptide_max_mass: float = 5000.0,
+    ) -> "IndexedDatabase":
+        """
+        Build an indexed database directly from a DIA-NN-style library.
+
+        Args:
+            library: Polars DataFrame with columns like:
+                - "StrippedPeptide", "ModifiedPeptide"
+                - "FragmentMz", "FragmentType", "FragmentCharge", "FragmentSeriesNumber"
+                - etc.
+            ion_kinds: List of ion types to include, e.g. ["b", "y"].
+            Other args mirror `from_peptides`.
+        """
+        if not isinstance(library, pl.DataFrame):
+            raise TypeError(
+                f"`library` must be a polars.DataFrame, got {type(library)!r}"
+            )
+
+        try:
+            ion_enum_list = [ION_KIND_MAP[k.lower()]() for k in ion_kinds]
+        except KeyError as e:
+            raise ValueError(
+                f"Invalid ion kind: {e.args[0]}. Must be one of {list(ION_KIND_MAP)}"
+            )
+
+        # This call is where we keep things zero-copy: `library` is passed
+        # directly to Rust as a Polars / Arrow DataFrame (via pyo3-polars).
+        inner = _rust.PyIndexedDatabase.from_library_and_config(
+            library_df=library,
+            bucket_size=bucket_size,
+            ion_kinds=ion_enum_list,
+            min_ion_index=min_ion_index,
+            generate_decoys=generate_decoys,
+            decoy_tag=decoy_tag,
+            peptide_min_mass=peptide_min_mass,
+            peptide_max_mass=peptide_max_mass,
+        )
+
+        return cls(inner)
+
 
     # -------------------------------------------------------------------------
     # Properties
