@@ -358,8 +358,9 @@ impl<'db> Scorer<'db> {
         };
 
         for peak in query.peaks.iter() {
-            for charge in 1..max_fragment_charge {
-                let mass = peak.mass * charge as f32;
+            //for charge in 1..max_fragment_charge {
+                //let mass = peak.mass * charge as f32;
+                let mass = peak.mass as f32;
                 for frag in candidates.page_search(mass) {
                     let idx = frag.peptide_index.0 as usize - candidates.pre_idx_lo;
                     let sc = &mut hits.preliminary[idx];
@@ -372,7 +373,7 @@ impl<'db> Scorer<'db> {
 
                     sc.matched += 1;
                     hits.matched_peaks += 1;
-                }
+                //}
             }
         }
         if hits.matched_peaks == 0 {
