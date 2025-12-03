@@ -9,7 +9,7 @@ import polars as pl
 def test_database_build():
     print("\n--- Database Build ---")
 
-    df = pl.read_csv('diann_tag6_Astral_MBR_anhy_May13_jmod.tsv', separator='\t')
+    df = pl.read_csv('trimmed_lib.tsv', separator='\t')
     print(df)
     # Create indexed database
     db = ps.IndexedDatabase.from_library(
@@ -30,30 +30,45 @@ def test_database_build():
 
     print("Fragment summary:", db.debug_fragment_summary())
 
-    expected_mass = mass.calculate_mass(sequence="PEPTIDEK")
-    print("Expected neutral mass (pyteomics):", expected_mass)
-    print("Precursor neutral mass (from m/z):", (464.73478 - 1.007276466812) * 2)
-
     return db
 
 
 def test_spectrum_build():
     print("\n--- Spectrum Build ---")
 
+    proton_mass = 1.0072764
     # 1. Precursor setup
-    precursor = ps.Precursor(mz=310.15896, charge=0, isolation_window=(-1000, 1000))
+    precursor = ps.Precursor(mz=956.55240, charge=0, isolation_window=(-1000, 1000))
 
     # 2. Peak data
-    proton_mass = 1.0072764
-    mz_arr = sorted([
-        98.06009, 227.10268, 324.15544, 425.20312, 538.28718, 653.31413,
-        782.35672, 910.45168, 928.46225, 831.40948, 702.36689, 605.31413,
-        504.26645, 391.18238, 276.15544, 147.11285
-    ])
-    mz_arr = [mz - proton_mass for mz in mz_arr]  # Convert to neutral masses
+    mz_arr = [72.04444,
+     143.08155,
+     214.11866,
+     285.15578,
+     356.19289,
+     427.23000,
+     498.26712,
+     611.35118,
+     739.40976,
+     810.44687,
+     938.54183,
+     956.55240,
+     885.51528,
+     814.47817,
+     743.44106,
+     672.40394,
+     601.36683,
+     530.32972,
+     459.29260,
+     346.20854,
+     218.14996,
+     147.11285]
+
+    mz_arr = sorted(mz_arr)
+    #mz_arr = [mz - proton_mass for mz in mz_arr]  # Convert to neutral masses
 
     # Testing mz_arr with dummy mod of 1000
-    mz_arr = [mz + 5.0 for mz in mz_arr]
+    #mz_arr = [mz + 5.0 for mz in mz_arr]
 
     int_arr = mz_arr  # dummy intensities for test
 

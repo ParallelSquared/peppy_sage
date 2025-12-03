@@ -361,7 +361,9 @@ impl<'db> Scorer<'db> {
             //for charge in 1..max_fragment_charge {
                 //let mass = peak.mass * charge as f32;
                 let mass = peak.mass as f32;
+                println!("query peak {}", mass);
                 for frag in candidates.page_search(mass) {
+                    println!("index peak {}", frag.fragment_mz);
                     let idx = frag.peptide_index.0 as usize - candidates.pre_idx_lo;
                     let sc = &mut hits.preliminary[idx];
                     if sc.matched == 0 {
@@ -376,11 +378,53 @@ impl<'db> Scorer<'db> {
                 //}
             }
         }
+
+        // DEBUG: print initial hits *before* trim
+        println!(
+            "InitialHits BEFORE trim for {}: matched_peaks={}, scored_candidates={}",
+            query.id, hits.matched_peaks, hits.scored_candidates
+        );
+        for (i, pre) in hits.preliminary.iter().enumerate() {
+            if pre.peptide != PeptideIx::default() {
+                let pep = &self.db[pre.peptide];
+                println!(
+                    "  [{}] peptide_idx={}, seq={:?}, matched={}, charge={}, isotope={}",
+                    i,
+                    pre.peptide.0,
+                    pep.sequence,
+                    pre.matched,
+                    pre.precursor_charge,
+                    pre.isotope_error
+                );
+            }
+        }
+
         if hits.matched_peaks == 0 {
             return hits;
         }
 
         self.trim_hits(&mut hits);
+
+        // DEBUG: print initial hits *after* trim
+        println!(
+            "InitialHits AFTER trim for {}: matched_peaks={}, scored_candidates={}",
+            query.id, hits.matched_peaks, hits.scored_candidates
+        );
+        for (i, pre) in hits.preliminary.iter().enumerate() {
+            if pre.peptide != PeptideIx::default() {
+                let pep = &self.db[pre.peptide];
+                println!(
+                    "  [{}] peptide_idx={}, seq={:?}, matched={}, charge={}, isotope={}",
+                    i,
+                    pre.peptide.0,
+                    pep.sequence,
+                    pre.matched,
+                    pre.precursor_charge,
+                    pre.isotope_error
+                );
+            }
+        }
+
         hits
     }
 
@@ -428,6 +472,7 @@ impl<'db> Scorer<'db> {
                 InitialHits::default(),
                 |mut hits, precursor_charge| {
                     let precursor_mass = mz * precursor_charge as f32;
+                    println!("precursor_mass: {}", precursor_mass);
                     let precursor_tol = precursor
                         .isolation_window
                         .unwrap_or(Tolerance::Da(-2.4, 2.4))
@@ -671,6 +716,75 @@ impl<'db> Scorer<'db> {
         let max_fragment_charge =
             max_fragment_charge(self.max_fragment_charge, score.precursor_charge);
 
+        let mut b_run = Run::default();
+        let mut y_run = Run::default();
+        let mut fragments_details = Fragments::default();
+
+        // ---------- NEW: library-fragment path ----------
+        if let Some(lib_frags) = &self.db.library_frags {
+            let pep_ix = score.peptide.0 as usize;
+            let lib_pep_frags = &lib_frags[pep_ix];
+
+            for frag in lib_pep_frags {
+                let mz = frag.mz; // already fragment m/z from library
+
+                if let Some(peak) = crate::spectrum::select_most_intense_peak(
+                    &query.peaks,
+                    mz,
+                    self.fragment_tol,
+                    None,
+                ) {
+                    score.ppm_difference +=
+                        peak.intensity * (mz - peak.mass).abs() * 2E6 / (mz + peak.mass);
+
+                    let exp_mz = peak.mass;
+                    let calc_mz = mz;
+
+                    match frag.kind {
+                        Kind::A | Kind::B | Kind::C => {
+                            score.matched_b += 1;
+                            score.summed_b += peak.intensity;
+                            b_run.matched(frag.ordinal as usize);
+                        }
+                        Kind::X | Kind::Y | Kind::Z => {
+                            score.matched_y += 1;
+                            score.summed_y += peak.intensity;
+                            y_run.matched(frag.ordinal as usize);
+                        }
+                    }
+
+                    if self.annotate_matches {
+                        let ord = match frag.kind {
+                            Kind::A | Kind::B | Kind::C => frag.ordinal as i32,
+                            Kind::X | Kind::Y | Kind::Z => {
+                                peptide.sequence.len().saturating_sub(1) as i32
+                                    - frag.ordinal as i32
+                            }
+                        };
+
+                        fragments_details.kinds.push(frag.kind);
+                        fragments_details.charges.push(frag.charge as i32);
+                        fragments_details.mz_experimental.push(exp_mz);
+                        fragments_details.mz_calculated.push(calc_mz);
+                        fragments_details.fragment_ordinals.push(ord);
+                        fragments_details.intensities.push(peak.intensity);
+                    }
+                }
+            }
+
+            score.hyperscore = score.hyperscore(self.score_type);
+            score.longest_b = b_run.longest;
+            score.longest_y = y_run.longest;
+            score.ppm_difference /= score.summed_b + score.summed_y;
+
+            if self.annotate_matches {
+                return (score, Some(fragments_details));
+            } else {
+                return (score, None);
+            }
+        }
+        // ---------- END library path; fall through to original behaviour ----------
+
         // Regenerate theoretical ions - initial database search might be
         // using only a subset of all possible ions (e.g. no b1/b2/y1/y2)
         // so we need to completely re-score this candidate
@@ -680,14 +794,9 @@ impl<'db> Scorer<'db> {
             .iter()
             .flat_map(|kind| IonSeries::new(peptide, *kind).enumerate());
 
-        let mut b_run = Run::default();
-        let mut y_run = Run::default();
-
-        let mut fragments_details = Fragments::default();
-
         for (idx, frag) in fragments {
             for charge in 1..max_fragment_charge {
-                // Experimental peaks are multipled by charge, therefore theoretical are divided
+                // Experimental peaks are multiplied by charge, therefore theoretical are divided
                 let mz = frag.monoisotopic_mass / charge as f32;
 
                 if let Some(peak) = crate::spectrum::select_most_intense_peak(
@@ -716,7 +825,7 @@ impl<'db> Scorer<'db> {
                     }
 
                     if self.annotate_matches {
-                        let idx = match frag.kind {
+                        let ord = match frag.kind {
                             Kind::A | Kind::B | Kind::C => idx as i32 + 1,
                             Kind::X | Kind::Y | Kind::Z => {
                                 peptide.sequence.len().saturating_sub(1) as i32 - idx as i32
@@ -726,7 +835,7 @@ impl<'db> Scorer<'db> {
                         fragments_details.charges.push(charge as i32);
                         fragments_details.mz_experimental.push(exp_mz);
                         fragments_details.mz_calculated.push(calc_mz);
-                        fragments_details.fragment_ordinals.push(idx);
+                        fragments_details.fragment_ordinals.push(ord);
                         fragments_details.intensities.push(peak.intensity);
                     }
                 }
@@ -741,7 +850,6 @@ impl<'db> Scorer<'db> {
         if self.annotate_matches {
             (score, Some(fragments_details))
         } else {
-            // drop(fragments_details);
             (score, None)
         }
     }

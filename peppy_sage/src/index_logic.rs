@@ -1,4 +1,4 @@
-use sage_core::database::{IndexedDatabase, PeptideIx, Theoretical};
+use sage_core::database::{IndexedDatabase, PeptideIx, Theoretical, LibraryFragment};
 use sage_core::peptide::Peptide;
 use sage_core::ion_series::{IonSeries, Kind};
 use sage_core::modification::ModificationSpecificity;
@@ -12,6 +12,7 @@ use polars_core::frame::DataFrame;
 use polars_core::prelude::*;
 use pyo3::pyclass::boolean_struct::False;
 use std::collections::HashMap;
+use sage_core::mass::{monoisotopic as aa_mono, H2O};
 // Add imports for types used in the original logic (e.g., DashSet, FnvBuildHasher, etc. if you copied that part)
 
 // 1. Define the minimal configuration struct
@@ -110,6 +111,7 @@ pub fn build_indexed_database(config: IndexingConfig, targets: Vec<Peptide>) -> 
     IndexedDatabase {
         peptides: peptides,
         fragments,
+        library_frags: None,
         min_value,
         bucket_size: config.bucket_size,
         ion_kinds: config.ion_kinds,
@@ -152,20 +154,19 @@ pub fn build_indexed_database_from_library(
     config: IndexingConfig,
     df: DataFrame,
 ) -> IndexedDatabase {
-    let unimod_table = unimod_table();
+    let unimod_table = unimod_table(); // HashMap<&'static str, f32>
+
     let n_rows = df.height();
 
     let seq_col = df
         .column("StrippedPeptide")
         .expect("library missing required column 'StrippedPeptide'");
+    let modpep_col = df
+        .column("ModifiedPeptide")
+        .expect("library missing required column 'ModifiedPeptide'");
 
-    // Optional columns
+    // optional numeric mods column
     let mods_col_opt = df.column("Modifications").ok();
-    let modpep_col_opt = df.column("ModifiedPeptide").ok();
-
-    if mods_col_opt.is_none() && modpep_col_opt.is_none() {
-        panic!("library must have either 'Modifications' or 'ModifiedPeptide'");
-    }
 
     let frag_mz_col = df
         .column("FragmentMz")
@@ -174,18 +175,29 @@ pub fn build_indexed_database_from_library(
         .column("RelativeIntensity")
         .expect("library missing required column 'RelativeIntensity'");
 
-    let mut peptides: Vec<Peptide> = Vec::new();
-    let mut fragments: Vec<Theoretical> = Vec::new();
+    let frag_type_col = df
+        .column("FragmentType")
+        .expect("library missing required column 'FragmentType'");
+    let frag_num_col = df
+        .column("FragmentSeriesNumber")
+        .expect("library missing required column 'FragmentSeriesNumber'");
+    let frag_z_col = df
+        .column("FragmentCharge")
+        .expect("library missing required column 'FragmentCharge'");
 
-    // NEW: map ModifiedPeptide string -> PeptideIx
-    let mut pep_map: HashMap<String, PeptideIx> = HashMap::new();
+    // 1) Collect unique peptides: ModifiedPeptide -> (StrippedPeptide, mods_vec)
+    let mut pep_mods: HashMap<String, (String, Vec<f32>)> = HashMap::new();
+
+    // 2) Aggregate ions across precursor charge states:
+    // key = (ModifiedPeptide, FragmentType, FragmentNumber, FragmentCharge)
+    // value = (mz_sum, intensity_sum, count)
+    let mut ion_agg: HashMap<(String, String, i32, i32), (f32, f32, u32)> = HashMap::new();
 
     for idx in 0..n_rows {
-        // -------------------- sequence --------------------
+        // -------- peptide-level stuff --------
         let seq_val = seq_col
             .get(idx)
             .unwrap_or_else(|_| panic!("null 'StrippedPeptide' at row {}", idx));
-
         let seq: String = match seq_val {
             AnyValue::String(s) => s.to_string(),
             AnyValue::StringOwned(ref s) => s.to_string(),
@@ -195,36 +207,23 @@ pub fn build_indexed_database_from_library(
             ),
         };
 
-        // -------------------- ModifiedPeptide (for key) --------------------
-        let modified: String = if let Some(modpep_col) = &modpep_col_opt {
-            let modpep_val = modpep_col
-                .get(idx)
-                .unwrap_or_else(|_| panic!("null 'ModifiedPeptide' at row {}", idx));
-
-            match modpep_val {
-                AnyValue::String(s) => s.to_string(),
-                AnyValue::StringOwned(ref s) => s.to_string(),
-                other => panic!(
-                    "'ModifiedPeptide' must be Utf8, got {:?} at row {}",
-                    other, idx
-                ),
-            }
-        } else {
-            // If there is no ModifiedPeptide column, you *could* synthesize
-            // one from seq + mods_vec, but since you asked to key on
-            // ModifiedPeptide, I’ll assume the column is present in your case.
-            panic!(
-                "missing 'ModifiedPeptide' column: cannot key peptides by ModifiedPeptide"
-            );
+        let modpep_val = modpep_col
+            .get(idx)
+            .unwrap_or_else(|_| panic!("null 'ModifiedPeptide' at row {}", idx));
+        let modified: String = match modpep_val {
+            AnyValue::String(s) => s.to_string(),
+            AnyValue::StringOwned(ref s) => s.to_string(),
+            other => panic!(
+                "'ModifiedPeptide' must be Utf8, got {:?} at row {}",
+                other, idx
+            ),
         };
 
-        // -------------------- mods_vec (float representation) --------------------
+        // ---- mods_vec = [N-term, per-res..., C-term] ----
         let mods_vec: Vec<f32> = if let Some(mods_col) = &mods_col_opt {
-            // Existing numeric representation: List(Float32) per row
             let mods_val = mods_col
                 .get(idx)
                 .unwrap_or_else(|_| panic!("null 'Modifications' at row {}", idx));
-
             let mods_series = match mods_val {
                 AnyValue::List(ref s) => s,
                 other => panic!(
@@ -232,24 +231,13 @@ pub fn build_indexed_database_from_library(
                     other, idx
                 ),
             };
-
             let mut v: Vec<f32> = Vec::with_capacity(mods_series.len());
-            for val in mods_series.iter() {
-                match val {
-                    AnyValue::Float32(x) => v.push(x),
-                    AnyValue::Float64(x) => v.push(x as f32),
-                    AnyValue::Int32(x) => v.push(x as f32),
-                    AnyValue::Int64(x) => v.push(x as f32),
-                    AnyValue::Null => v.push(0.0),
-                    other => panic!(
-                        "'Modifications' inner values must be numeric, got {:?} at row {}",
-                        other, idx
-                    ),
-                }
+            for mv in mods_series.iter() {
+                v.push(anyvalue_to_f32(&mv, "Modifications", idx));
             }
             v
         } else {
-            // Fallback: parse from ModifiedPeptide with UniMod annotations
+            // derive from ModifiedPeptide with UniMod / DIANN labels
             mods_from_modified_peptide(&seq, &modified, &unimod_table)
         };
 
@@ -263,51 +251,47 @@ pub fn build_indexed_database_from_library(
             );
         }
 
-        let nterm = mods_vec[0];
-        let cterm = mods_vec[mods_vec.len() - 1];
-        let per_res_mods = mods_vec[1..mods_vec.len() - 1].to_vec();
+        // store peptide info once per ModifiedPeptide
+        pep_mods
+            .entry(modified.clone())
+            .or_insert_with(|| (seq.clone(), mods_vec.clone()));
 
-        // -------------------- obtain or create PeptideIx --------------------
-        let pep_ix = if let Some(&existing) = pep_map.get(&modified) {
-            // Seen this ModifiedPeptide before -> reuse peptide index
-            existing
-        } else {
-            // New peptide
-            let seq_bytes: Arc<[u8]> = seq.clone().into_bytes().into_boxed_slice().into();
-
-            let peptide = Peptide {
-                sequence: seq_bytes,
-                monoisotopic: 0.0,
-                proteins: vec![Arc::from("LIBRARY".to_string())],
-                decoy: false,
-                modifications: per_res_mods,
-                nterm: Some(nterm),
-                cterm: Some(cterm),
-                missed_cleavages: 0,
-                semi_enzymatic: false,
-                position: Position::default(),
-            };
-
-            let new_ix = PeptideIx(peptides.len() as u32);
-            pep_map.insert(modified.clone(), new_ix);
-            peptides.push(peptide);
-            new_ix
+        // -------- fragment-level stuff (for aggregation) --------
+        let frag_type_val = frag_type_col
+            .get(idx)
+            .unwrap_or_else(|_| panic!("null 'FragmentType' at row {}", idx));
+        let frag_type: String = match frag_type_val {
+            AnyValue::String(s) => s.to_string(),
+            AnyValue::StringOwned(ref s) => s.to_string(),
+            other => panic!(
+                "'FragmentType' must be Utf8, got {:?} at row {}",
+                other, idx
+            ),
         };
 
-        // -------------------- fragments --------------------
-        fn anyvalue_to_f32(v: &AnyValue, col: &str, idx: usize) -> f32 {
-            match v {
-                AnyValue::Float32(x) => *x,
-                AnyValue::Float64(x) => *x as f32,
-                AnyValue::Int32(x)   => *x as f32,
-                AnyValue::Int64(x)   => *x as f32,
-                AnyValue::Null       => 0.0,
-                other => panic!(
-                    "'{}' must be numeric, got {:?} at row {}",
-                    col, other, idx
-                ),
-            }
-        }
+        let frag_num_val = frag_num_col
+            .get(idx)
+            .unwrap_or_else(|_| panic!("null 'FragmentNumber' at row {}", idx));
+        let frag_num = match frag_num_val {
+            AnyValue::Int32(x) => x,
+            AnyValue::Int64(x) => x as i32,
+            other => panic!(
+                "'FragmentNumber' must be integer, got {:?} at row {}",
+                other, idx
+            ),
+        };
+
+        let frag_z_val = frag_z_col
+            .get(idx)
+            .unwrap_or_else(|_| panic!("null 'FragmentCharge' at row {}", idx));
+        let frag_z = match frag_z_val {
+            AnyValue::Int32(x) => x,
+            AnyValue::Int64(x) => x as i32,
+            other => panic!(
+                "'FragmentCharge' must be integer, got {:?} at row {}",
+                other, idx
+            ),
+        };
 
         let frag_mz_val = frag_mz_col
             .get(idx)
@@ -316,25 +300,122 @@ pub fn build_indexed_database_from_library(
             .get(idx)
             .unwrap_or_else(|_| panic!("null 'RelativeIntensity' at row {}", idx));
 
-        // In your library: one fragment per row → single scalar values
         let mz = anyvalue_to_f32(&frag_mz_val, "FragmentMz", idx);
-        let _intensity = anyvalue_to_f32(&frag_int_val, "RelativeIntensity", idx);
-        // (we ignore intensity for indexing – you can store it elsewhere if needed)
+        let inten = anyvalue_to_f32(&frag_int_val, "RelativeIntensity", idx);
 
+        let key = (modified.clone(), frag_type, frag_num, frag_z);
+
+        let entry = ion_agg.entry(key).or_insert((0.0f32, 0.0f32, 0u32));
+        entry.0 += mz;
+        entry.1 += inten;
+        entry.2 += 1;
+    }
+
+    // -------- build peptides (unique per ModifiedPeptide) --------
+    let mut peptides: Vec<Peptide> = Vec::with_capacity(pep_mods.len());
+    let mut pep_index: HashMap<String, PeptideIx> = HashMap::with_capacity(pep_mods.len());
+
+    for (modified, (seq, mods_vec)) in pep_mods {
+        let n = seq.len();
+        if mods_vec.len() != n + 2 {
+            panic!(
+                "inconsistent mods length {} != seq.len+2 ({}) for '{}'",
+                mods_vec.len(),
+                n + 2,
+                modified
+            );
+        }
+        let nterm = mods_vec[0];
+        let cterm = mods_vec[mods_vec.len() - 1];
+        let per_res_mods = mods_vec[1..mods_vec.len() - 1].to_vec();
+
+        let mono = mono_from_seq_and_mods(&seq, &mods_vec);
+
+        let seq_bytes: Arc<[u8]> = seq.clone().into_bytes().into_boxed_slice().into();
+
+        let peptide = Peptide {
+            sequence: seq_bytes,
+            monoisotopic: mono,
+            proteins: vec![Arc::from("LIBRARY".to_string())],
+            decoy: false,
+            modifications: per_res_mods,
+            nterm: Some(nterm),
+            cterm: Some(cterm),
+            missed_cleavages: 0,
+            semi_enzymatic: false,
+            position: Position::default(),
+        };
+
+        let ix = PeptideIx(peptides.len() as u32);
+        pep_index.insert(modified, ix);
+        peptides.push(peptide);
+    }
+
+    // -------- build fragments from aggregated ions --------
+    let mut fragments: Vec<Theoretical> = Vec::with_capacity(ion_agg.len());
+    let mut library_frags: Vec<Vec<LibraryFragment>> = vec![Vec::new(); peptides.len()];
+
+    for ((modified, ftype, fnum, fz), (mz_sum, inten_sum, count)) in ion_agg {
+        let pep_ix = *pep_index
+            .get(&modified)
+            .unwrap_or_else(|| panic!("internal error: missing peptide index for '{}'", modified));
+
+        let avg_mz  = mz_sum  / (count as f32);
+        let avg_int = inten_sum / (count as f32);
+
+        // keep index lean: only peptide_index + fragment_mz
         fragments.push(Theoretical {
             peptide_index: pep_ix,
-            fragment_mz: mz,
+            fragment_mz: avg_mz,
+        });
+
+        // full fragment info goes into side table
+        let kind = match ftype.as_str() {
+            "b" | "B" => Kind::B,
+            "y" | "Y" => Kind::Y,
+            "a" | "A" => Kind::A,
+            "x" | "X" => Kind::X,
+            "c" | "C" => Kind::C,
+            "z" | "Z" => Kind::Z,
+            other => panic!("unsupported FragmentType '{}' in library", other),
+        };
+
+        library_frags[pep_ix.0 as usize].push(LibraryFragment {
+            mz: avg_mz,
+            kind,
+            ordinal: fnum as u16,
+            charge: fz as u8,
+            rel_intensity: avg_int,
         });
     }
 
-    // -------------------- decoys --------------------
+    // ensure sorted in ordinal order
+    fn kind_order(k: Kind) -> u8 {
+        match k {
+            Kind::A => 0,
+            Kind::B => 1,
+            Kind::C => 2,
+            Kind::X => 3,
+            Kind::Y => 4,
+            Kind::Z => 5,
+        }
+    }
+    for frags in &mut library_frags {
+        frags.sort_unstable_by(|a, b| {
+            kind_order(a.kind)
+                .cmp(&kind_order(b.kind))
+                .then(a.ordinal.cmp(&b.ordinal))
+        });
+    }
+
+    // -------- optional decoys (still skipped here) --------
     if config.generate_decoys {
         eprintln!(
             "Warning: generate_decoys is not yet supported in build_indexed_database_from_library; returning targets only."
         );
     }
 
-    // -------------------- sort + bucket fragments --------------------
+    // -------- sort + bucket fragments as before --------
     use rayon::prelude::*;
 
     fragments.par_sort_unstable_by(|a, b| a.fragment_mz.total_cmp(&b.fragment_mz));
@@ -352,18 +433,34 @@ pub fn build_indexed_database_from_library(
             .collect::<Vec<_>>()
     };
 
+    println!("{}", peptides.get(0).unwrap().monoisotopic);
+
     IndexedDatabase {
         peptides,
         fragments,
+        library_frags: Some(library_frags),
         min_value,
         bucket_size: config.bucket_size,
-        ion_kinds: config.ion_kinds.clone(), // unused but kept for compat
-        generate_decoys: false,              // unused but kept for compat
+        ion_kinds: config.ion_kinds.clone(), // unused here but kept for compat
+        generate_decoys: false,
         potential_mods: Vec::new(),
         decoy_tag: config.decoy_tag.clone(),
     }
 }
 
+fn anyvalue_to_f32(v: &AnyValue, col: &str, idx: usize) -> f32 {
+    match v {
+        AnyValue::Float32(x) => *x,
+        AnyValue::Float64(x) => *x as f32,
+        AnyValue::Int32(x)   => *x as f32,
+        AnyValue::Int64(x)   => *x as f32,
+        AnyValue::Null       => 0.0,
+        other => panic!(
+            "'{}' must be numeric, got {:?} at row {}",
+            col, other, idx
+        ),
+    }
+}
 
 fn mods_from_modified_peptide(
     seq: &str,
@@ -375,19 +472,18 @@ fn mods_from_modified_peptide(
 
     let chars: Vec<char> = modified.chars().collect();
     let mut i = 0usize;
-    let mut aa_idx = 0usize; // index in seq (0..n)
+    let mut aa_idx = 0usize;
 
     while i < chars.len() {
         let c = chars[i];
 
         if c == '(' {
-            // Could be N-term, C-term, or residue-level following a residue.
             let term_target = if aa_idx == 0 {
-                Some(0usize) // N-term
+                Some(0usize)
             } else if aa_idx == n {
-                Some(n + 1) // C-term
+                Some(n + 1)
             } else {
-                None // residue-level for the last seen residue
+                None
             };
 
             let mut unimod = String::new();
@@ -408,18 +504,15 @@ fn mods_from_modified_peptide(
             if let Some(pos) = term_target {
                 mods[pos] += mass;
             } else {
-                // residue-level mod attached to the last AA we saw
                 if aa_idx == 0 {
                     panic!(
                         "Residue-level UniMod '{}' appears before any residue in '{}'",
                         unimod, modified
                     );
                 }
-                // AA index aa_idx-1 → mods index aa_idx
                 mods[aa_idx] += mass;
             }
         } else if c.is_ascii_alphabetic() && c.is_ascii_uppercase() {
-            // Amino acid; must match the stripped sequence
             if aa_idx >= n {
                 panic!(
                     "More residues in ModifiedPeptide '{}' than in StrippedPeptide '{}'",
@@ -451,6 +544,35 @@ fn mods_from_modified_peptide(
     }
 
     mods
+}
+
+
+fn mono_from_seq_and_mods(seq: &str, mods_vec: &[f32]) -> f32 {
+    // mods_vec layout: [N-term, per-res..., C-term], length = seq.len() + 2
+    assert_eq!(
+        mods_vec.len(),
+        seq.len() + 2,
+        "mods_vec must be [N-term, per-res..., C-term]"
+    );
+
+    let nterm = mods_vec[0];
+    let cterm = mods_vec[mods_vec.len() - 1];
+    let per_res_mods = &mods_vec[1..mods_vec.len() - 1];
+
+    let mut mass = H2O;
+
+    for (aa, mod_mass) in seq.as_bytes().iter().zip(per_res_mods.iter()) {
+        let base = aa_mono(*aa);
+        if base == 0.0 {
+            panic!(
+                "Invalid residue '{}' in library sequence '{}'",
+                *aa as char, seq
+            );
+        }
+        mass += base + mod_mass;
+    }
+
+    mass + nterm + cterm
 }
 
 pub fn unimod_table() -> HashMap<&'static str, f32> {

@@ -354,12 +354,13 @@ impl Parameters {
         IndexedDatabase {
             peptides: target_decoys,
             fragments,
+            library_frags: None,
             min_value,
             bucket_size: self.bucket_size,
             ion_kinds: self.ion_kinds,
             generate_decoys: self.generate_decoys,
             potential_mods,
-            decoy_tag: self.decoy_tag,
+            decoy_tag: self.decoy_tag
         }
     }
 }
@@ -381,10 +382,20 @@ pub struct Theoretical {
     pub fragment_mz: f32,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Serialize)]
+pub struct LibraryFragment {
+    pub mz: f32,
+    pub kind: Kind,
+    pub ordinal: u16,
+    pub charge: u8,
+    pub rel_intensity: f32,
+}
+
 #[derive(Default)]
 pub struct IndexedDatabase {
     pub peptides: Vec<Peptide>,
     pub fragments: Vec<Theoretical>,
+    pub library_frags: Option<Vec<Vec<LibraryFragment>>>,
     pub ion_kinds: Vec<Kind>,
     pub min_value: Vec<f32>,
     /// Keep a list of potential (AA, mass) modifications for RT prediction
