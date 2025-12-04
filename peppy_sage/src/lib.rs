@@ -12,8 +12,8 @@ use pyo3::prelude::*;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::types::PyString;
 use pyo3::types::PyDict;
-use pyo3::buffer::PyBuffer;
 use pyo3::types::PyAny;
+use pyo3::FromPyObject;
 use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
 use std::sync::Arc;
@@ -1258,44 +1258,26 @@ impl PyFeatureArrays {
 impl PyProcessedSpectrum {
     #[new]
     #[pyo3(signature = (id, file_id, scan_start_time, mz_array, intensity_array, precursors, total_ion_current))]
-    pub fn new<'py>(
-        py: Python<'py>,                        // get a GIL handle in the constructor
+    pub fn new(
         id: String,
         file_id: usize,
         scan_start_time: f32,
-        // accept *any* buffer-exporting object (NumPy array, memoryview, array('f'), etc.)
-        mz_array: Bound<'py, PyAny>,
-        intensity_array: Bound<'py, PyAny>,
+        mz_array: Vec<f32>,
+        intensity_array: Vec<f32>,
         precursors: Vec<PyPrecursor>,
         total_ion_current: f32,
     ) -> PyResult<Self> {
-        // 1) Acquire typed buffers (float32) using the *bound* API
-        let buf_mz:  PyBuffer<f32> = PyBuffer::get(&mz_array)?;
-        let buf_int: PyBuffer<f32> = PyBuffer::get(&intensity_array)?;
+        use pyo3::exceptions::PyValueError;
 
-        // 2) Validate shape/layout
-        if !buf_mz.is_c_contiguous() || !buf_int.is_c_contiguous() {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "mz_array and intensity_array must be C-contiguous float32 buffers",
-            ));
-        }
-        if buf_mz.item_count() != buf_int.item_count() {
-            return Err(pyo3::exceptions::PyValueError::new_err(
+        if mz_array.len() != intensity_array.len() {
+            return Err(PyValueError::new_err(
                 "mz_array and intensity_array must be the same length",
             ));
         }
 
-        // 3) Borrow as slices (zero Python-float boxing), then copy once to Vecs
-        //    SAFETY: dtype verified by PyBuffer<f32> and contiguity checked above
-        let mz_cells  = unsafe { buf_mz.as_slice(py) }
-            .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("Failed to get mz_array slice"))?;
-        let int_cells = unsafe { buf_int.as_slice(py) }
-            .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("Failed to get intensity_array slice"))?;
-
-        // 4) Pack into Peaks (owned, mutable on Rust side)
-        let peaks: Vec<Peak> = mz_cells.iter()
-            .zip(int_cells.iter())
-            .map(|(m, i)| Peak { mass: m.get(), intensity: i.get() })
+        let peaks: Vec<Peak> = mz_array.into_iter()
+            .zip(intensity_array.into_iter())
+            .map(|(m, i)| Peak { mass: m, intensity: i })
             .collect();
 
         Ok(PyProcessedSpectrum {
