@@ -18,7 +18,8 @@ use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
 use std::sync::Arc;
 use pyo3_polars::PyDataFrame;
-use polars_core::frame::DataFrame;
+use polars::prelude::*;
+
 
 use std::fs::File;
 
@@ -371,18 +372,32 @@ fn features_to_arrays(
 // Now that the struct is defined, you can write the methods.
 #[pymethods]
 impl PyLibrary {
+    // 1. You must hold the GIL momentarily to get the data out of Python
     #[new]
-    pub fn new(df: &PyAny) -> PyResult<Self> {
-        // Python Polars DataFrame -> PyDataFrame
+    pub fn new(df: Bound<'_, PyAny>) -> PyResult<Self> {
+        // --- GIL HELD ---
+
+        // Python Polars DataFrame -> PyDataFrame (Bridge Type)
+        // This extract operation requires the GIL.
         let py_df: PyDataFrame = df.extract()?;
 
-        // This is &polars_core::frame::DataFrame, which now matches our `DataFrame` alias
+        // This gives us a reference to the internal Rust DataFrame.
+        // This reference is valid only while the PyDataFrame exists (and implicitly, while the GIL is held).
+        // If py_df.as_ref() is still giving you an issue, use the correct accessor for your version:
+        // let df_ref: &DataFrame = py_df.get_dataframe().map_err(|e| PyRuntimeError::new_err(format!("Error: {}", e)))?;
         let df_ref: &DataFrame = py_df.as_ref();
 
-        // Cheap clone: just bumps Arc refs internally, no data copy
-        let df = df_ref.clone();
+        // 2. Cheap Clone for Ownership (Crucial Step for GIL Independence)
+        // This clones the Arc references to the data. It requires the GIL
+        // because it interacts with the internal structure of a Python-managed object.
+        let owned_df = df_ref.clone();
 
-        Ok(Self { df })
+        // 3. GIL Released
+        // When the `new` function returns, the GIL is automatically released, but more importantly:
+        // The `owned_df` is now a pure Rust `DataFrame` that holds its own Arc references
+        // to the data buffers. It is now fully independent of Python's GIL and thread-safe.
+
+        Ok(Self { df: owned_df })
     }
 }
 
@@ -812,7 +827,7 @@ impl PyFragments {
 
     /// Optional helper: return as Python dict for easier pandas conversion
     pub fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        let dict = PyDict::new_bound(py);
+        let dict = PyDict::new(py);
         dict.set_item("charges", self.charges())?;
         dict.set_item("kinds", self.kinds())?;
         dict.set_item("fragment_ordinals", self.fragment_ordinals())?;
@@ -1065,7 +1080,7 @@ impl PyFeature {
     }
 
     pub fn to_dict(&self, py: Python<'_>) -> PyResult<PyObject> {
-        let d = PyDict::new_bound(py);
+        let d = PyDict::new(py);
         d.set_item("file_id", self.inner.file_id)?;
         d.set_item("spec_id", self.inner.spec_id.clone())?;
         d.set_item("psm_id", self.inner.psm_id)?;
@@ -1255,8 +1270,8 @@ impl PyProcessedSpectrum {
         total_ion_current: f32,
     ) -> PyResult<Self> {
         // 1) Acquire typed buffers (float32) using the *bound* API
-        let buf_mz:  PyBuffer<f32> = PyBuffer::get_bound(&mz_array)?;
-        let buf_int: PyBuffer<f32> = PyBuffer::get_bound(&intensity_array)?;
+        let buf_mz:  PyBuffer<f32> = PyBuffer::get(&mz_array)?;
+        let buf_int: PyBuffer<f32> = PyBuffer::get(&intensity_array)?;
 
         // 2) Validate shape/layout
         if !buf_mz.is_c_contiguous() || !buf_int.is_c_contiguous() {
