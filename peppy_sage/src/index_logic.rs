@@ -433,8 +433,6 @@ pub fn build_indexed_database_from_library(
             .collect::<Vec<_>>()
     };
 
-    println!("{}", peptides.get(0).unwrap().monoisotopic);
-
     IndexedDatabase {
         peptides,
         fragments,

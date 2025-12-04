@@ -361,9 +361,7 @@ impl<'db> Scorer<'db> {
             //for charge in 1..max_fragment_charge {
                 //let mass = peak.mass * charge as f32;
                 let mass = peak.mass as f32;
-                println!("query peak {}", mass);
                 for frag in candidates.page_search(mass) {
-                    println!("index peak {}", frag.fragment_mz);
                     let idx = frag.peptide_index.0 as usize - candidates.pre_idx_lo;
                     let sc = &mut hits.preliminary[idx];
                     if sc.matched == 0 {
@@ -379,52 +377,12 @@ impl<'db> Scorer<'db> {
             }
         }
 
-        // DEBUG: print initial hits *before* trim
-        println!(
-            "InitialHits BEFORE trim for {}: matched_peaks={}, scored_candidates={}",
-            query.id, hits.matched_peaks, hits.scored_candidates
-        );
-        for (i, pre) in hits.preliminary.iter().enumerate() {
-            if pre.peptide != PeptideIx::default() {
-                let pep = &self.db[pre.peptide];
-                println!(
-                    "  [{}] peptide_idx={}, seq={:?}, matched={}, charge={}, isotope={}",
-                    i,
-                    pre.peptide.0,
-                    pep.sequence,
-                    pre.matched,
-                    pre.precursor_charge,
-                    pre.isotope_error
-                );
-            }
-        }
-
         if hits.matched_peaks == 0 {
             return hits;
         }
 
         self.trim_hits(&mut hits);
-
-        // DEBUG: print initial hits *after* trim
-        println!(
-            "InitialHits AFTER trim for {}: matched_peaks={}, scored_candidates={}",
-            query.id, hits.matched_peaks, hits.scored_candidates
-        );
-        for (i, pre) in hits.preliminary.iter().enumerate() {
-            if pre.peptide != PeptideIx::default() {
-                let pep = &self.db[pre.peptide];
-                println!(
-                    "  [{}] peptide_idx={}, seq={:?}, matched={}, charge={}, isotope={}",
-                    i,
-                    pre.peptide.0,
-                    pep.sequence,
-                    pre.matched,
-                    pre.precursor_charge,
-                    pre.isotope_error
-                );
-            }
-        }
-
+        
         hits
     }
 
@@ -472,7 +430,6 @@ impl<'db> Scorer<'db> {
                 InitialHits::default(),
                 |mut hits, precursor_charge| {
                     let precursor_mass = mz * precursor_charge as f32;
-                    println!("precursor_mass: {}", precursor_mass);
                     let precursor_tol = precursor
                         .isolation_window
                         .unwrap_or(Tolerance::Da(-2.4, 2.4))
