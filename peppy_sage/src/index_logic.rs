@@ -194,51 +194,63 @@ pub fn build_indexed_database_from_library(
 
     for idx in 0..n_rows {
         // -------- peptide-level stuff --------
+
+        // 1) Read stripped sequence
         let seq_val = seq_col
             .get(idx)
             .unwrap_or_else(|_| panic!("null 'StrippedPeptide' at row {}", idx));
         let seq: String = match seq_val {
             AnyValue::String(s) => s.to_string(),
             AnyValue::StringOwned(ref s) => s.to_string(),
-            other => panic!(
-                "'StrippedPeptide' must be Utf8, got {:?} at row {}",
-                other, idx
-            ),
+            _ => panic!("StrippedPeptide must be Utf8 at row {}", idx),
         };
 
+        // 2) Read ModifiedPeptide (always exists, always used as key)
         let modpep_val = modpep_col
             .get(idx)
             .unwrap_or_else(|_| panic!("null 'ModifiedPeptide' at row {}", idx));
         let modified: String = match modpep_val {
             AnyValue::String(s) => s.to_string(),
             AnyValue::StringOwned(ref s) => s.to_string(),
-            other => panic!(
-                "'ModifiedPeptide' must be Utf8, got {:?} at row {}",
-                other, idx
-            ),
+            _ => panic!("ModifiedPeptide must be Utf8 at row {}", idx),
         };
 
-        // ---- mods_vec = [N-term, per-res..., C-term] ----
+        // 3) Determine mods_vec
         let mods_vec: Vec<f32> = if let Some(mods_col) = &mods_col_opt {
+            // ---- CASE A: user provided explicit masses ----
             let mods_val = mods_col
                 .get(idx)
                 .unwrap_or_else(|_| panic!("null 'Modifications' at row {}", idx));
-            let mods_series = match mods_val {
+            let list = match mods_val {
                 AnyValue::List(ref s) => s,
-                other => panic!(
-                    "'Modifications' must be List(Float32) per row, got {:?} at row {}",
-                    other, idx
-                ),
+                _ => panic!("Modifications must be List(Float32) at row {}", idx),
             };
-            let mut v: Vec<f32> = Vec::with_capacity(mods_series.len());
-            for mv in mods_series.iter() {
+
+            let mut v = Vec::with_capacity(list.len());
+            for mv in list.iter() {
                 v.push(anyvalue_to_f32(&mv, "Modifications", idx));
             }
+
+            if v.len() != seq.len() + 2 {
+                panic!(
+                    "Modifications length {} != seq.len+2 ({}) for '{}' at row {}",
+                    v.len(),
+                    seq.len() + 2,
+                    modified,
+                    idx
+                );
+            }
+
             v
         } else {
-            // derive from ModifiedPeptide with UniMod / DIANN labels
+            // ---- CASE B: fallback — parse ModifiedPeptide ----
             mods_from_modified_peptide(&seq, &modified, &unimod_table)
         };
+
+        // 4) Store peptide once using ModifiedPeptide as the key
+        pep_mods
+            .entry(modified.clone())
+            .or_insert_with(|| (seq.clone(), mods_vec.clone()));
 
         if mods_vec.len() != seq.len() + 2 {
             panic!(
