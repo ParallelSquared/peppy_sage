@@ -17,7 +17,7 @@ def test_database_build():
         bucket_size=128,
         ion_kinds=["b", "y"],
         min_ion_index=0,
-        generate_decoys=True,
+        generate_decoys=False,
         decoy_tag="rev_",
         peptide_min_mass=0.0,
         peptide_max_mass=5000.0,
@@ -38,7 +38,7 @@ def test_spectrum_build():
 
     proton_mass = 1.0072764
     # 1. Precursor setup
-    precursor = ps.Precursor(mz=956.55240, charge=0, isolation_window=(-1000, 1000))
+    precursor = ps.Precursor(mz=956.55240, charge=0, isolation_window=(-2.4, 2.4))
 
     # 2. Peak data
     mz_arr = [72.04444,
@@ -109,7 +109,7 @@ def test_scoring(db, spectrum):
         wide_window=True,
         chimera=False,
         annotate_matches=True,
-        report_psms=1
+        report_psms=10
     )
 
     spectra = [spectrum]
