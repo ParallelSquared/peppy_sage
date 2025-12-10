@@ -470,6 +470,19 @@ impl<'db> Scorer<'db> {
                 },
             )
         };
+        let peptide_counts: std::collections::HashMap<PeptideIx, usize> =
+            hits.preliminary.iter()
+                .filter(|p| p.peptide != PeptideIx::default())
+                .fold(std::collections::HashMap::new(), |mut map, p| {
+                    *map.entry(p.peptide).or_insert(0) += 1;
+                    map
+                });
+        for (pep, count) in peptide_counts.iter() {
+            if *count > 1 {
+                eprintln!("  DUPLICATE: peptide {:?} appears {} times in preliminary", pep, count);
+            }
+        }
+
         self.trim_hits(&mut hits);
         hits
     }
