@@ -38,7 +38,8 @@ def test_spectrum_build():
 
     proton_mass = 1.0072764
     # 1. Precursor setup
-    precursor = ps.Precursor(mz=956.55240, charge=0, isolation_window=(-2.4, 2.4))
+    precursor = ps.Precursor(mz=(956.55240+proton_mass)/2, charge=0, isolation_window=(-2.4, 2.4))
+    #precursor = ps.Precursor(mz=(1056.55240+proton_mass)/2, charge=0, isolation_window=(-2.4, 2.4))
 
     # 2. Peak data
     mz_arr = [72.04444,
@@ -109,7 +110,7 @@ def test_scoring(db, spectrum):
         wide_window=True,
         chimera=False,
         annotate_matches=True,
-        report_psms=10
+        report_psms=100
     )
 
     spectra = [spectrum]
@@ -134,7 +135,8 @@ def test_scoring(db, spectrum):
 
     col_names = feature_arrays.get_column_names()
     df = pd.DataFrame({name: getattr(feature_arrays, name) for name in col_names})
-    print(df)
+    print(df.columns)
+    print(df['expmass'], df['calcmass'])
 
 
 if __name__ == "__main__":

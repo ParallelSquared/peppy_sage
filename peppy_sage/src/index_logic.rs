@@ -411,6 +411,7 @@ pub fn build_indexed_database_from_library(
             Kind::Z => 5,
         }
     }
+
     for frags in &mut library_frags {
         frags.sort_unstable_by(|a, b| {
             kind_order(a.kind)
@@ -418,6 +419,9 @@ pub fn build_indexed_database_from_library(
                 .then(a.ordinal.cmp(&b.ordinal))
         });
     }
+
+    // This reorders peptides + library_frags together, and remaps fragments' peptide_index.
+    reorder_library_mode(&mut peptides, &mut library_frags, &mut fragments);
 
     // -------- optional decoys (still skipped here) --------
     if config.generate_decoys {
@@ -427,7 +431,6 @@ pub fn build_indexed_database_from_library(
     }
 
     // -------- sort + bucket fragments as before --------
-    use rayon::prelude::*;
 
     fragments.par_sort_unstable_by(|a, b| a.fragment_mz.total_cmp(&b.fragment_mz));
 
@@ -555,6 +558,46 @@ fn mods_from_modified_peptide(
     mods
 }
 
+/// Finalize peptide ordering for library-built DB:
+/// 1) sort peptides by (monoisotopic, initial_sort)
+/// 2) dedup identical peptides (same keys as Sage core)
+/// 3) remap fragment.peptide_index to the new peptide indices
+/// 4) keep library_frags aligned with peptides (and merged on dedup)
+fn reorder_library_mode(
+    peptides: &mut Vec<Peptide>,
+    library_frags: &mut Vec<Vec<LibraryFragment>>,
+    fragments: &mut Vec<Theoretical>,
+) {
+    let n = peptides.len();
+    assert_eq!(library_frags.len(), n);
+
+    // perm[new] = old, sorted by precursor monoisotopic mass
+    let mut perm: Vec<usize> = (0..n).collect();
+    perm.par_sort_unstable_by(|&a, &b| {
+        peptides[a]
+            .monoisotopic
+            .total_cmp(&peptides[b].monoisotopic)
+            .then_with(|| peptides[a].initial_sort(&peptides[b]))
+    });
+
+    // inverse mapping old -> new
+    let mut old_to_new = vec![0usize; n];
+    for (new_i, &old_i) in perm.iter().enumerate() {
+        old_to_new[old_i] = new_i;
+    }
+
+    // reorder peptides + library_frags (moves only, no clones)
+    permute_vec(peptides, &perm);
+    permute_vec_of_vec(library_frags, &perm);
+
+    // remap fragment peptide indices to new order
+    fragments.par_iter_mut().for_each(|t| {
+        let old = t.peptide_index.0 as usize;
+        let new = old_to_new[old] as u32;
+        t.peptide_index = PeptideIx(new);
+    });
+}
+
 
 fn mono_from_seq_and_mods(seq: &str, mods_vec: &[f32]) -> f32 {
     // mods_vec layout: [N-term, per-res..., C-term], length = seq.len() + 2
@@ -582,6 +625,30 @@ fn mono_from_seq_and_mods(seq: &str, mods_vec: &[f32]) -> f32 {
     }
 
     mass + nterm + cterm
+}
+
+/// perm[new] = old
+fn permute_vec<T>(v: &mut Vec<T>, perm: &[usize]) {
+    let old: Vec<Option<T>> = std::mem::take(v).into_iter().map(Some).collect();
+    let mut old = old; // mutable so we can take()
+
+    let mut out = Vec::with_capacity(perm.len());
+    for &old_i in perm {
+        out.push(old[old_i].take().expect("permute_vec: duplicate index"));
+    }
+    *v = out;
+}
+
+/// perm[new] = old, for Vec<Vec<T>>
+fn permute_vec_of_vec<T>(v: &mut Vec<Vec<T>>, perm: &[usize]) {
+    let old: Vec<Option<Vec<T>>> = std::mem::take(v).into_iter().map(Some).collect();
+    let mut old = old;
+
+    let mut out = Vec::with_capacity(perm.len());
+    for &old_i in perm {
+        out.push(old[old_i].take().expect("permute_vec_of_vec: duplicate index"));
+    }
+    *v = out;
 }
 
 pub fn unimod_table() -> HashMap<&'static str, f32> {
