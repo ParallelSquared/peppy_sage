@@ -383,14 +383,6 @@ impl<'db> Scorer<'db> {
 
         self.trim_hits(&mut hits);
 
-        eprintln!("matched_peaks_with_isotope: precursor_charge={}, pre_idx_lo={}, pre_idx_hi={}, preliminary.len()={}",
-                  precursor_charge, candidates.pre_idx_lo, candidates.pre_idx_hi, hits.preliminary.len());
-        for (i, pre) in hits.preliminary.iter().enumerate() {
-            if pre.peptide != PeptideIx::default() {
-                eprintln!("  idx={}, peptide={:?}, matched={}", i, pre.peptide, pre.matched);
-            }
-        }
-
         hits
     }
 
@@ -477,11 +469,6 @@ impl<'db> Scorer<'db> {
                     *map.entry(p.peptide).or_insert(0) += 1;
                     map
                 });
-        for (pep, count) in peptide_counts.iter() {
-            if *count > 1 {
-                eprintln!("  DUPLICATE: peptide {:?} appears {} times in preliminary", pep, count);
-            }
-        }
 
         self.trim_hits(&mut hits);
         hits
@@ -517,24 +504,8 @@ impl<'db> Scorer<'db> {
             .filter(|s| (s.0.matched_b + s.0.matched_y) >= self.min_matched_peaks)
             .collect::<Vec<_>>();
 
-        eprintln!("--- candidates for spectrum {} ---", query.id);
-        for (s, _) in &score_vector {
-            eprintln!(
-                "peptide={:?}, charge={}, iso={}, matched_b={}, matched_y={}, hyperscore={}",
-                s.peptide, s.precursor_charge, s.isotope_error, s.matched_b, s.matched_y, s.hyperscore
-            );
-        }
-
         // Hyperscore is our primary score function for PSMs
         score_vector.sort_by(|a, b| b.0.hyperscore.total_cmp(&a.0.hyperscore));
-
-        eprintln!("--- candidates for spectrum {} ---", query.id);
-        for (s, _) in &score_vector {
-            eprintln!(
-                "peptide={:?}, charge={}, iso={}, matched_b={}, matched_y={}, hyperscore={}",
-                s.peptide, s.precursor_charge, s.isotope_error, s.matched_b, s.matched_y, s.hyperscore
-            );
-        }
 
         // Expected value for poisson distribution
         // (average # of matches peaks/peptide candidate)
