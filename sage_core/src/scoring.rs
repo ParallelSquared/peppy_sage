@@ -719,13 +719,9 @@ impl<'db> Scorer<'db> {
                     }
 
                     if self.annotate_matches {
-                        let ord = match frag.kind {
-                            Kind::A | Kind::B | Kind::C => frag.ordinal as i32,
-                            Kind::X | Kind::Y | Kind::Z => {
-                                peptide.sequence.len().saturating_sub(1) as i32
-                                    - frag.ordinal as i32
-                            }
-                        };
+                        // Library fragments already have actual fragment numbers stored,
+                        // no transformation needed (unlike theoretical fragments which use iterator indices)
+                        let ord = frag.ordinal as i32;
 
                         fragments_details.kinds.push(frag.kind);
                         fragments_details.charges.push(frag.charge as i32);
