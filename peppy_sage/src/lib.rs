@@ -17,7 +17,6 @@ use pyo3::FromPyObject;
 use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
 use std::sync::Arc;
-use std::collections::HashMap;
 use pyo3_polars::PyDataFrame;
 use polars::prelude::*;
 
@@ -46,7 +45,6 @@ pub struct PyLibrary {
 #[pyclass(module = "peppy_sage")]
 pub struct PyIndexedDatabase {
     pub inner: Arc<IndexedDatabase>,
-    pub precursor_charge_map: Option<HashMap<PeptideIx, u8>>,
 }
 
 #[pyclass(module = "peppy_sage")]
@@ -456,10 +454,7 @@ impl PyIndexedDatabase {
         }));
 
         match result {
-            Ok(db) => Ok(PyIndexedDatabase {
-                inner: Arc::new(db),
-                precursor_charge_map: None, // Not applicable for FASTA-based database
-            }),
+            Ok(db) => Ok(PyIndexedDatabase { inner: Arc::new(db) }), // ✅ wrap once here
             Err(_) => Err(PyRuntimeError::new_err(
                 "Rust panic occurred during indexed database generation.",
             )),
@@ -510,10 +505,7 @@ impl PyIndexedDatabase {
         }));
 
         match result {
-            Ok((db, charge_map)) => Ok(PyIndexedDatabase {
-                inner: Arc::new(db),
-                precursor_charge_map: Some(charge_map),
-            }),
+            Ok(db) => Ok(PyIndexedDatabase { inner: Arc::new(db) }),
             Err(_) => Err(PyRuntimeError::new_err(
                 "Rust panic occurred during indexed database generation from library.",
             )),
@@ -542,13 +534,6 @@ impl PyIndexedDatabase {
     /// Quick count of total fragments
     pub fn fragment_count(&self) -> usize {
         self.inner.fragments.len()
-    }
-
-    /// Get the precursor charge for a given peptide index (library mode only)
-    pub fn precursor_charge_for(&self, pep_index: u32) -> Option<u8> {
-        self.precursor_charge_map
-            .as_ref()
-            .and_then(|map| map.get(&PeptideIx(pep_index)).copied())
     }
 }
 

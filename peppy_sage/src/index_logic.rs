@@ -152,7 +152,7 @@ fn sort_and_dedup(peptides: &mut Vec<Peptide>) {
 pub fn build_indexed_database_from_library(
     config: IndexingConfig,
     df: DataFrame,
-) -> (IndexedDatabase, HashMap<PeptideIx, u8>) {
+) -> IndexedDatabase {
     let unimod_table = unimod_table(); // HashMap<&'static str, f32>
 
     let n_rows = df.height();
@@ -184,18 +184,13 @@ pub fn build_indexed_database_from_library(
         .column("FragmentCharge")
         .expect("library missing required column 'FragmentCharge'");
 
-    // NEW: Extract precursor charge column
-    let precursor_z_col = df
-        .column("PrecursorCharge")
-        .expect("library missing required column 'PrecursorCharge'");
+    // 1) Collect unique peptides: ModifiedPeptide -> (StrippedPeptide, mods_vec)
+    let mut pep_mods: HashMap<String, (String, Vec<f32>)> = HashMap::new();
 
-    // 1) Collect unique peptides: (ModifiedPeptide, PrecursorCharge) -> (StrippedPeptide, mods_vec)
-    let mut pep_mods: HashMap<(String, u8), (String, Vec<f32>)> = HashMap::new();
-
-    // 2) NO longer aggregate ions across precursor charge states - keep them separate:
-    // key = (ModifiedPeptide, PrecursorCharge, FragmentType, FragmentNumber, FragmentCharge)
+    // 2) Aggregate ions across precursor charge states:
+    // key = (ModifiedPeptide, FragmentType, FragmentNumber, FragmentCharge)
     // value = (mz_sum, intensity_sum, count)
-    let mut ion_agg: HashMap<(String, u8, String, i32, i32), (f32, f32, u32)> = HashMap::new();
+    let mut ion_agg: HashMap<(String, String, i32, i32), (f32, f32, u32)> = HashMap::new();
 
     for idx in 0..n_rows {
         // -------- peptide-level stuff --------
@@ -220,19 +215,7 @@ pub fn build_indexed_database_from_library(
             _ => panic!("ModifiedPeptide must be Utf8 at row {}", idx),
         };
 
-        // 3) Read PrecursorCharge
-        let precursor_z_val = precursor_z_col
-            .get(idx)
-            .unwrap_or_else(|_| panic!("null 'PrecursorCharge' at row {}", idx));
-        let precursor_z: u8 = match precursor_z_val {
-            AnyValue::Int32(x) => x as u8,
-            AnyValue::Int64(x) => x as u8,
-            AnyValue::UInt32(x) => x as u8,
-            AnyValue::UInt64(x) => x as u8,
-            other => panic!("'PrecursorCharge' must be integer, got {:?} at row {}", other, idx),
-        };
-
-        // 4) Determine mods_vec
+        // 3) Determine mods_vec
         let mods_vec: Vec<f32> = if let Some(mods_col) = &mods_col_opt {
             // ---- CASE A: user provided explicit masses ----
             let mods_val = mods_col
@@ -264,6 +247,11 @@ pub fn build_indexed_database_from_library(
             mods_from_modified_peptide(&seq, &modified, &unimod_table)
         };
 
+        // 4) Store peptide once using ModifiedPeptide as the key
+        pep_mods
+            .entry(modified.clone())
+            .or_insert_with(|| (seq.clone(), mods_vec.clone()));
+
         if mods_vec.len() != seq.len() + 2 {
             panic!(
                 "modifications length {} != sequence length + 2 ({}) at row {} (seq='{}')",
@@ -274,9 +262,9 @@ pub fn build_indexed_database_from_library(
             );
         }
 
-        // 5) Store peptide once per (ModifiedPeptide, PrecursorCharge) combination
+        // store peptide info once per ModifiedPeptide
         pep_mods
-            .entry((modified.clone(), precursor_z))
+            .entry(modified.clone())
             .or_insert_with(|| (seq.clone(), mods_vec.clone()));
 
         // -------- fragment-level stuff (for aggregation) --------
@@ -326,8 +314,7 @@ pub fn build_indexed_database_from_library(
         let mz = anyvalue_to_f32(&frag_mz_val, "FragmentMz", idx);
         let inten = anyvalue_to_f32(&frag_int_val, "RelativeIntensity", idx);
 
-        // 6) Aggregate fragments per (ModifiedPeptide, PrecursorCharge) combination
-        let key = (modified.clone(), precursor_z, frag_type, frag_num, frag_z);
+        let key = (modified.clone(), frag_type, frag_num, frag_z);
 
         let entry = ion_agg.entry(key).or_insert((0.0f32, 0.0f32, 0u32));
         entry.0 += mz;
@@ -335,12 +322,11 @@ pub fn build_indexed_database_from_library(
         entry.2 += 1;
     }
 
-    // -------- build peptides (unique per (ModifiedPeptide, PrecursorCharge)) --------
+    // -------- build peptides (unique per ModifiedPeptide) --------
     let mut peptides: Vec<Peptide> = Vec::with_capacity(pep_mods.len());
-    let mut pep_index: HashMap<(String, u8), PeptideIx> = HashMap::with_capacity(pep_mods.len());
-    let mut charge_mapping: HashMap<PeptideIx, u8> = HashMap::with_capacity(pep_mods.len());
+    let mut pep_index: HashMap<String, PeptideIx> = HashMap::with_capacity(pep_mods.len());
 
-    for ((modified, precursor_z), (seq, mods_vec)) in pep_mods {
+    for (modified, (seq, mods_vec)) in pep_mods {
         let n = seq.len();
         if mods_vec.len() != n + 2 {
             panic!(
@@ -372,8 +358,7 @@ pub fn build_indexed_database_from_library(
         };
 
         let ix = PeptideIx(peptides.len() as u32);
-        pep_index.insert((modified, precursor_z), ix);
-        charge_mapping.insert(ix, precursor_z);
+        pep_index.insert(modified, ix);
         peptides.push(peptide);
     }
 
@@ -381,10 +366,10 @@ pub fn build_indexed_database_from_library(
     let mut fragments: Vec<Theoretical> = Vec::with_capacity(ion_agg.len());
     let mut library_frags: Vec<Vec<LibraryFragment>> = vec![Vec::new(); peptides.len()];
 
-    for ((modified, precursor_z, ftype, fnum, fz), (mz_sum, inten_sum, count)) in ion_agg {
+    for ((modified, ftype, fnum, fz), (mz_sum, inten_sum, count)) in ion_agg {
         let pep_ix = *pep_index
-            .get(&(modified.clone(), precursor_z))
-            .unwrap_or_else(|| panic!("internal error: missing peptide index for '{}' with charge {}", modified, precursor_z));
+            .get(&modified)
+            .unwrap_or_else(|| panic!("internal error: missing peptide index for '{}'", modified));
 
         let avg_mz  = mz_sum  / (count as f32);
         let avg_int = inten_sum / (count as f32);
@@ -462,20 +447,17 @@ pub fn build_indexed_database_from_library(
             .collect::<Vec<_>>()
     };
 
-    (
-        IndexedDatabase {
-            peptides,
-            fragments,
-            library_frags: Some(library_frags),
-            min_value,
-            bucket_size: config.bucket_size,
-            ion_kinds: config.ion_kinds.clone(), // unused here but kept for compat
-            generate_decoys: false,
-            potential_mods: Vec::new(),
-            decoy_tag: config.decoy_tag.clone(),
-        },
-        charge_mapping,
-    )
+    IndexedDatabase {
+        peptides,
+        fragments,
+        library_frags: Some(library_frags),
+        min_value,
+        bucket_size: config.bucket_size,
+        ion_kinds: config.ion_kinds.clone(), // unused here but kept for compat
+        generate_decoys: false,
+        potential_mods: Vec::new(),
+        decoy_tag: config.decoy_tag.clone(),
+    }
 }
 
 fn anyvalue_to_f32(v: &AnyValue, col: &str, idx: usize) -> f32 {
