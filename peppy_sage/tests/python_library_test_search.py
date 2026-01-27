@@ -137,6 +137,7 @@ def test_scoring(db, spectrum):
     df = pd.DataFrame({name: getattr(feature_arrays, name) for name in col_names})
     print(df.columns)
     print(df['expmass'], df['calcmass'])
+    print(df['modified_peptide'])
 
 
 if __name__ == "__main__":

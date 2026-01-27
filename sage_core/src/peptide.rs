@@ -28,6 +28,8 @@ pub struct Peptide {
     pub position: Position,
 
     pub proteins: Vec<Arc<str>>,
+    /// Modified peptide string (e.g., `(UniMod:35)PEPTM(UniMod:35)IDE`), set during library indexing
+    pub modified_peptide: Option<String>,
 }
 
 impl Peptide {
@@ -66,6 +68,7 @@ impl Debug for Peptide {
             .field("monoisotopic", &self.monoisotopic)
             .field("missed_cleavages", &self.missed_cleavages)
             .field("position", &self.position)
+            .field("modified_peptide", &self.modified_peptide)
             .finish()
     }
 }
@@ -307,6 +310,7 @@ impl Peptide {
     pub fn reverse(&self) -> Peptide {
         let mut pep = self.clone();
         pep.decoy = !self.decoy;
+        pep.modified_peptide = None;
         let n = pep.sequence.len().saturating_sub(1);
         if n > 1 {
             let mut s = Vec::from(pep.sequence.as_ref());
@@ -383,6 +387,7 @@ impl TryFrom<Digest> for Peptide {
             missed_cleavages: value.missed_cleavages,
             semi_enzymatic: value.semi_enzymatic,
             proteins: vec![value.protein],
+            modified_peptide: None,
         })
     }
 }

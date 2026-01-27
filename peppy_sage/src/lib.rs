@@ -116,6 +116,8 @@ pub struct PyFeatureArrays {
     // Peptide info (extracted)
     #[pyo3(get)]
     pub sequence: Vec<String>,
+    #[pyo3(get)]
+    pub modified_peptide: Vec<String>,
     // Modifications are complex (list of floats). Using a list of lists (Vec<Vec<f32>>)
     // is the most direct way to transfer this, though Polars might prefer
     // to map this column to a List<Float32> type.
@@ -227,6 +229,7 @@ fn features_to_arrays(
     arrays.psm_id.reserve(total_features);
     arrays.rank.reserve(total_features);
     arrays.sequence.reserve(total_features);
+    arrays.modified_peptide.reserve(total_features);
     arrays.modifications.reserve(total_features);
     arrays.peptide_len.reserve(total_features);
     arrays.missed_cleavages.reserve(total_features);
@@ -287,6 +290,13 @@ fn features_to_arrays(
             // Sequence
             arrays.sequence.push(String::from_utf8_lossy(&p.inner.sequence).into_owned());
 
+            // Modified peptide string
+            arrays.modified_peptide.push(
+                p.inner.modified_peptide
+                    .clone()
+                    .unwrap_or_else(|| format!("{}", p.inner))
+            );
+
             // Modifications: Assuming the underlying Peptide struct has a method
             // equivalent to PyPeptide::mod_array() (e.g., `p.mod_array()`)
             // that returns the N-term, residue, and C-term mods as Vec<f32>.
@@ -296,6 +306,7 @@ fn features_to_arrays(
             arrays.peptide_len.push(0);
             arrays.missed_cleavages.push(0);
             arrays.sequence.push(String::new());
+            arrays.modified_peptide.push(String::new());
             arrays.modifications.push(vec![]);
         }
 
@@ -716,6 +727,7 @@ impl PyPeptide {
                 missed_cleavages: 0,
                 semi_enzymatic: false,
                 position: Position::default(),
+                modified_peptide: None,
             },
         }
     }
@@ -1148,6 +1160,7 @@ impl PyFeatureArrays {
 
         // Peptide info
         self.sequence.extend(other.sequence);
+        self.modified_peptide.extend(other.modified_peptide);
         self.modifications.extend(other.modifications);
         self.peptide_len.extend(other.peptide_len);
         self.missed_cleavages.extend(other.missed_cleavages);
@@ -1225,32 +1238,56 @@ impl PyFeatureArrays {
 
     /// Returns a list of all column names (field names) available in this struct.
     pub fn get_column_names(&self) -> Vec<String> {
-        let debug_string = format!("{:?}", self);
-        // This is a common trick: the Debug output for a struct lists all field names.
-        // We parse this string to get the names.
-
-        let struct_name = "PyFeatureArrays {";
-        if let Some(start) = debug_string.find(struct_name) {
-            let fields_string = &debug_string[start + struct_name.len()..];
-            let mut names = Vec::new();
-
-            for field in fields_string.split(", ") {
-                if let Some(name_end) = field.find(':') {
-                    let name = field[..name_end].trim().to_string();
-                    if !name.is_empty() {
-                        names.push(name);
-                    }
-                }
-            }
-            // Remove the trailing '}' from the last field name if present
-            if let Some(last) = names.last_mut() {
-                if last.ends_with('}') {
-                    last.pop();
-                }
-            }
-            return names;
-        }
-        Vec::new()
+        vec![
+            "file_id",
+            "spec_id",
+            "psm_id",
+            "rank",
+            "sequence",
+            "modified_peptide",
+            "modifications",
+            "peptide_len",
+            "missed_cleavages",
+            "expmass",
+            "calcmass",
+            "charge",
+            "delta_mass",
+            "isotope_error",
+            "average_ppm",
+            "hyperscore",
+            "delta_next",
+            "delta_best",
+            "poisson",
+            "discriminant_score",
+            "matched_peaks",
+            "matched_intensity_pct",
+            "longest_b",
+            "longest_y",
+            "longest_y_pct",
+            "scored_candidates",
+            "ms2_intensity",
+            "rt",
+            "aligned_rt",
+            "predicted_rt",
+            "delta_rt_model",
+            "ims",
+            "predicted_ims",
+            "delta_ims_model",
+            "label",
+            "spectrum_q",
+            "peptide_q",
+            "protein_q",
+            "posterior_error",
+            "frag_charges",
+            "frag_kinds",
+            "frag_fragment_ordinals",
+            "frag_intensities",
+            "frag_mz_calculated",
+            "frag_mz_experimental",
+        ]
+        .into_iter()
+        .map(|s| s.to_string())
+        .collect()
     }
 }
 

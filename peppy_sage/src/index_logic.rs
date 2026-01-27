@@ -355,6 +355,7 @@ pub fn build_indexed_database_from_library(
             missed_cleavages: 0,
             semi_enzymatic: false,
             position: Position::default(),
+            modified_peptide: Some(modified.clone()),
         };
 
         let ix = PeptideIx(peptides.len() as u32);
