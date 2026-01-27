@@ -11,7 +11,7 @@ use pyo3_polars::PyDataFrame;
 use polars::prelude::*;
 use pyo3::pyclass::boolean_struct::False;
 use std::collections::HashMap;
-use sage_core::mass::{monoisotopic as aa_mono, H2O};
+use sage_core::mass::{monoisotopic as aa_mono, H2O, PROTON};
 // Add imports for types used in the original logic (e.g., DashSet, FnvBuildHasher, etc. if you copied that part)
 
 // 1. Define the minimal configuration struct
@@ -184,13 +184,17 @@ pub fn build_indexed_database_from_library(
         .column("FragmentCharge")
         .expect("library missing required column 'FragmentCharge'");
 
-    // 1) Collect unique peptides: ModifiedPeptide -> (StrippedPeptide, mods_vec)
-    let mut pep_mods: HashMap<String, (String, Vec<f32>)> = HashMap::new();
+    let precursor_z_col = df
+        .column("PrecursorCharge")
+        .expect("library missing required column 'PrecursorCharge'");
 
-    // 2) Aggregate ions across precursor charge states:
-    // key = (ModifiedPeptide, FragmentType, FragmentNumber, FragmentCharge)
+    // 1) Collect unique peptides: (ModifiedPeptide, PrecursorCharge) -> (StrippedPeptide, mods_vec)
+    let mut pep_mods: HashMap<(String, i32), (String, Vec<f32>)> = HashMap::new();
+
+    // 2) Aggregate ions per precursor charge state:
+    // key = (ModifiedPeptide, PrecursorCharge, FragmentType, FragmentNumber, FragmentCharge)
     // value = (mz_sum, intensity_sum, count)
-    let mut ion_agg: HashMap<(String, String, i32, i32), (f32, f32, u32)> = HashMap::new();
+    let mut ion_agg: HashMap<(String, i32, String, i32, i32), (f32, f32, u32)> = HashMap::new();
 
     for idx in 0..n_rows {
         // -------- peptide-level stuff --------
@@ -213,6 +217,19 @@ pub fn build_indexed_database_from_library(
             AnyValue::String(s) => s.to_string(),
             AnyValue::StringOwned(ref s) => s.to_string(),
             _ => panic!("ModifiedPeptide must be Utf8 at row {}", idx),
+        };
+
+        // 2b) Read PrecursorCharge
+        let precursor_z_val = precursor_z_col
+            .get(idx)
+            .unwrap_or_else(|_| panic!("null 'PrecursorCharge' at row {}", idx));
+        let precursor_z: i32 = match precursor_z_val {
+            AnyValue::Int32(x) => x,
+            AnyValue::Int64(x) => x as i32,
+            other => panic!(
+                "'PrecursorCharge' must be integer, got {:?} at row {}",
+                other, idx
+            ),
         };
 
         // 3) Determine mods_vec
@@ -247,9 +264,9 @@ pub fn build_indexed_database_from_library(
             mods_from_modified_peptide(&seq, &modified, &unimod_table)
         };
 
-        // 4) Store peptide once using ModifiedPeptide as the key
+        // 4) Store peptide once using (ModifiedPeptide, PrecursorCharge) as the key
         pep_mods
-            .entry(modified.clone())
+            .entry((modified.clone(), precursor_z))
             .or_insert_with(|| (seq.clone(), mods_vec.clone()));
 
         if mods_vec.len() != seq.len() + 2 {
@@ -262,9 +279,9 @@ pub fn build_indexed_database_from_library(
             );
         }
 
-        // store peptide info once per ModifiedPeptide
+        // store peptide info once per (ModifiedPeptide, PrecursorCharge)
         pep_mods
-            .entry(modified.clone())
+            .entry((modified.clone(), precursor_z))
             .or_insert_with(|| (seq.clone(), mods_vec.clone()));
 
         // -------- fragment-level stuff (for aggregation) --------
@@ -314,7 +331,7 @@ pub fn build_indexed_database_from_library(
         let mz = anyvalue_to_f32(&frag_mz_val, "FragmentMz", idx);
         let inten = anyvalue_to_f32(&frag_int_val, "RelativeIntensity", idx);
 
-        let key = (modified.clone(), frag_type, frag_num, frag_z);
+        let key = (modified.clone(), precursor_z, frag_type, frag_num, frag_z);
 
         let entry = ion_agg.entry(key).or_insert((0.0f32, 0.0f32, 0u32));
         entry.0 += mz;
@@ -322,11 +339,11 @@ pub fn build_indexed_database_from_library(
         entry.2 += 1;
     }
 
-    // -------- build peptides (unique per ModifiedPeptide) --------
+    // -------- build peptides (unique per (ModifiedPeptide, PrecursorCharge)) --------
     let mut peptides: Vec<Peptide> = Vec::with_capacity(pep_mods.len());
-    let mut pep_index: HashMap<String, PeptideIx> = HashMap::with_capacity(pep_mods.len());
+    let mut pep_index: HashMap<(String, i32), PeptideIx> = HashMap::with_capacity(pep_mods.len());
 
-    for (modified, (seq, mods_vec)) in pep_mods {
+    for ((modified, precursor_z), (seq, mods_vec)) in pep_mods {
         let n = seq.len();
         if mods_vec.len() != n + 2 {
             panic!(
@@ -342,11 +359,14 @@ pub fn build_indexed_database_from_library(
 
         let mono = mono_from_seq_and_mods(&seq, &mods_vec);
 
+        // Calculate precursor m/z for charge-state-aware indexing
+        let precursor_mz = (mono + precursor_z as f32 * PROTON) / precursor_z as f32;
+
         let seq_bytes: Arc<[u8]> = seq.clone().into_bytes().into_boxed_slice().into();
 
         let peptide = Peptide {
             sequence: seq_bytes,
-            monoisotopic: mono,
+            monoisotopic: precursor_mz,  // Store precursor m/z for indexing
             proteins: vec![Arc::from("LIBRARY".to_string())],
             decoy: false,
             modifications: per_res_mods,
@@ -354,12 +374,13 @@ pub fn build_indexed_database_from_library(
             cterm: Some(cterm),
             missed_cleavages: 0,
             semi_enzymatic: false,
+            precursor_charge: Some(precursor_z as u8),  // Track charge for calcmass conversion
             position: Position::default(),
             modified_peptide: Some(modified.clone()),
         };
 
         let ix = PeptideIx(peptides.len() as u32);
-        pep_index.insert(modified, ix);
+        pep_index.insert((modified, precursor_z), ix);
         peptides.push(peptide);
     }
 
@@ -367,10 +388,10 @@ pub fn build_indexed_database_from_library(
     let mut fragments: Vec<Theoretical> = Vec::with_capacity(ion_agg.len());
     let mut library_frags: Vec<Vec<LibraryFragment>> = vec![Vec::new(); peptides.len()];
 
-    for ((modified, ftype, fnum, fz), (mz_sum, inten_sum, count)) in ion_agg {
+    for ((modified, precursor_z, ftype, fnum, fz), (mz_sum, inten_sum, count)) in ion_agg {
         let pep_ix = *pep_index
-            .get(&modified)
-            .unwrap_or_else(|| panic!("internal error: missing peptide index for '{}'", modified));
+            .get(&(modified.clone(), precursor_z))
+            .unwrap_or_else(|| panic!("internal error: missing peptide index for '{}' z={}", modified, precursor_z));
 
         let avg_mz  = mz_sum  / (count as f32);
         let avg_int = inten_sum / (count as f32);

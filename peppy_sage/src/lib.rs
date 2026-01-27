@@ -726,6 +726,7 @@ impl PyPeptide {
                 cterm: cterm,
                 missed_cleavages: 0,
                 semi_enzymatic: false,
+                precursor_charge: None,
                 position: Position::default(),
                 modified_peptide: None,
             },

@@ -24,6 +24,8 @@ pub struct Peptide {
     pub missed_cleavages: u8,
     /// Is this a semi-enzymatic peptide?
     pub semi_enzymatic: bool,
+    /// Precursor charge state (for library mode charge-aware indexing)
+    pub precursor_charge: Option<u8>,
     /// Where is this peptide located in the protein?
     pub position: Position,
 
@@ -67,6 +69,7 @@ impl Debug for Peptide {
             .field("cterm", &self.cterm)
             .field("monoisotopic", &self.monoisotopic)
             .field("missed_cleavages", &self.missed_cleavages)
+            .field("precursor_charge", &self.precursor_charge)
             .field("position", &self.position)
             .field("modified_peptide", &self.modified_peptide)
             .finish()
@@ -386,6 +389,7 @@ impl TryFrom<Digest> for Peptide {
             cterm: None,
             missed_cleavages: value.missed_cleavages,
             semi_enzymatic: value.semi_enzymatic,
+            precursor_charge: None,
             proteins: vec![value.protein],
             modified_peptide: None,
         })

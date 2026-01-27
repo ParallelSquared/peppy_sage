@@ -542,8 +542,17 @@ impl<'db> Scorer<'db> {
             }
 
             let isotope_error = score.isotope_error as f32 * NEUTRON;
-            let delta_mass = (precursor_mass - peptide.monoisotopic - isotope_error) * 2E6
-                / (precursor_mass - isotope_error + peptide.monoisotopic);
+            // For library mode with charge-aware indexing, monoisotopic stores precursor m/z
+            // Convert back to neutral mass for output
+            let calcmass = if let Some(z) = peptide.precursor_charge {
+                let z_f32 = z as f32;
+                peptide.monoisotopic * z_f32 - z_f32 * PROTON
+            } else {
+                peptide.monoisotopic
+            };
+
+            let delta_mass = (precursor_mass - calcmass - isotope_error) * 2E6
+                / (precursor_mass - isotope_error + calcmass);
 
             // let (num_proteins, proteins) = self.db.assign_proteins(peptide);
 
@@ -556,7 +565,7 @@ impl<'db> Scorer<'db> {
                 rank: idx as u32 + 1,
                 label: peptide.label(),
                 expmass: precursor_mass,
-                calcmass: peptide.monoisotopic,
+                calcmass,
                 // Features
                 charge: score.precursor_charge,
                 rt: query.scan_start_time,
