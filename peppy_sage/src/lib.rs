@@ -1289,6 +1289,141 @@ impl PyFeatureArrays {
         .map(|s| s.to_string())
         .collect()
     }
+
+    /// Convert to a Polars DataFrame entirely in Rust, avoiding repeated
+    /// Rust→Python boundary crossings for each column.
+    pub fn to_polars(&self) -> PyResult<PyDataFrame> {
+        // Helper to convert Vec<Vec<i32>> to a List column
+        fn vec_vec_i32_to_list_column(name: &str, data: &[Vec<i32>]) -> PolarsResult<Column> {
+            let chunks: Vec<Series> = data
+                .iter()
+                .map(|v| Series::new(PlSmallStr::from_static(""), v.as_slice()))
+                .collect();
+            let chunked: ListChunked = chunks.iter().collect();
+            Ok(chunked.with_name(PlSmallStr::from_str(name)).into_column())
+        }
+
+        // Helper to convert Vec<Vec<f32>> to a List column
+        fn vec_vec_f32_to_list_column(name: &str, data: &[Vec<f32>]) -> PolarsResult<Column> {
+            let chunks: Vec<Series> = data
+                .iter()
+                .map(|v| Series::new(PlSmallStr::from_static(""), v.as_slice()))
+                .collect();
+            let chunked: ListChunked = chunks.iter().collect();
+            Ok(chunked.with_name(PlSmallStr::from_str(name)).into_column())
+        }
+
+        // Helper to convert Vec<Vec<String>> to a List column
+        fn vec_vec_string_to_list_column(name: &str, data: &[Vec<String>]) -> PolarsResult<Column> {
+            let chunks: Vec<Series> = data
+                .iter()
+                .map(|v| {
+                    let str_slice: Vec<&str> = v.iter().map(|s| s.as_str()).collect();
+                    Series::new(PlSmallStr::from_static(""), str_slice.as_slice())
+                })
+                .collect();
+            let chunked: ListChunked = chunks.iter().collect();
+            Ok(chunked.with_name(PlSmallStr::from_str(name)).into_column())
+        }
+
+        // Convert usize vecs to u64 for Polars compatibility
+        let file_id_u64: Vec<u64> = self.file_id.iter().map(|&x| x as u64).collect();
+        let psm_id_u64: Vec<u64> = self.psm_id.iter().map(|&x| x as u64).collect();
+        let peptide_len_u64: Vec<u64> = self.peptide_len.iter().map(|&x| x as u64).collect();
+
+        // Convert u8 vecs to i32 for Polars compatibility
+        let missed_cleavages_i32: Vec<i32> = self.missed_cleavages.iter().map(|&x| x as i32).collect();
+        let charge_i32: Vec<i32> = self.charge.iter().map(|&x| x as i32).collect();
+
+        // Build all columns
+        let columns: Vec<Column> = vec![
+            // Basic identifiers
+            Series::new(PlSmallStr::from_static("file_id"), file_id_u64.as_slice()).into_column(),
+            Series::new(PlSmallStr::from_static("spec_id"), self.spec_id.as_slice()).into_column(),
+            Series::new(PlSmallStr::from_static("psm_id"), psm_id_u64.as_slice()).into_column(),
+            Series::new(PlSmallStr::from_static("rank"), self.rank.as_slice()).into_column(),
+
+            // Peptide info
+            Series::new(PlSmallStr::from_static("sequence"), self.sequence.as_slice()).into_column(),
+            Series::new(PlSmallStr::from_static("modified_peptide"), self.modified_peptide.as_slice()).into_column(),
+            Series::new(PlSmallStr::from_static("peptide_len"), peptide_len_u64.as_slice()).into_column(),
+            Series::new(PlSmallStr::from_static("missed_cleavages"), missed_cleavages_i32.as_slice()).into_column(),
+
+            // Mass and error metrics
+            Series::new(PlSmallStr::from_static("expmass"), self.expmass.as_slice()).into_column(),
+            Series::new(PlSmallStr::from_static("calcmass"), self.calcmass.as_slice()).into_column(),
+            Series::new(PlSmallStr::from_static("charge"), charge_i32.as_slice()).into_column(),
+            Series::new(PlSmallStr::from_static("delta_mass"), self.delta_mass.as_slice()).into_column(),
+            Series::new(PlSmallStr::from_static("isotope_error"), self.isotope_error.as_slice()).into_column(),
+            Series::new(PlSmallStr::from_static("average_ppm"), self.average_ppm.as_slice()).into_column(),
+
+            // Score metrics
+            Series::new(PlSmallStr::from_static("hyperscore"), self.hyperscore.as_slice()).into_column(),
+            Series::new(PlSmallStr::from_static("delta_next"), self.delta_next.as_slice()).into_column(),
+            Series::new(PlSmallStr::from_static("delta_best"), self.delta_best.as_slice()).into_column(),
+            Series::new(PlSmallStr::from_static("poisson"), self.poisson.as_slice()).into_column(),
+            Series::new(PlSmallStr::from_static("discriminant_score"), self.discriminant_score.as_slice()).into_column(),
+
+            // Spectrum matching metrics
+            Series::new(PlSmallStr::from_static("matched_peaks"), self.matched_peaks.as_slice()).into_column(),
+            Series::new(PlSmallStr::from_static("matched_intensity_pct"), self.matched_intensity_pct.as_slice()).into_column(),
+            Series::new(PlSmallStr::from_static("longest_b"), self.longest_b.as_slice()).into_column(),
+            Series::new(PlSmallStr::from_static("longest_y"), self.longest_y.as_slice()).into_column(),
+            Series::new(PlSmallStr::from_static("longest_y_pct"), self.longest_y_pct.as_slice()).into_column(),
+            Series::new(PlSmallStr::from_static("scored_candidates"), self.scored_candidates.as_slice()).into_column(),
+            Series::new(PlSmallStr::from_static("ms2_intensity"), self.ms2_intensity.as_slice()).into_column(),
+
+            // RT/IMS metrics
+            Series::new(PlSmallStr::from_static("rt"), self.rt.as_slice()).into_column(),
+            Series::new(PlSmallStr::from_static("aligned_rt"), self.aligned_rt.as_slice()).into_column(),
+            Series::new(PlSmallStr::from_static("predicted_rt"), self.predicted_rt.as_slice()).into_column(),
+            Series::new(PlSmallStr::from_static("delta_rt_model"), self.delta_rt_model.as_slice()).into_column(),
+            Series::new(PlSmallStr::from_static("ims"), self.ims.as_slice()).into_column(),
+            Series::new(PlSmallStr::from_static("predicted_ims"), self.predicted_ims.as_slice()).into_column(),
+            Series::new(PlSmallStr::from_static("delta_ims_model"), self.delta_ims_model.as_slice()).into_column(),
+
+            // Q-values and label
+            Series::new(PlSmallStr::from_static("label"), self.label.as_slice()).into_column(),
+            Series::new(PlSmallStr::from_static("spectrum_q"), self.spectrum_q.as_slice()).into_column(),
+            Series::new(PlSmallStr::from_static("peptide_q"), self.peptide_q.as_slice()).into_column(),
+            Series::new(PlSmallStr::from_static("protein_q"), self.protein_q.as_slice()).into_column(),
+            Series::new(PlSmallStr::from_static("posterior_error"), self.posterior_error.as_slice()).into_column(),
+        ];
+
+        // Build the modifications list column (Vec<Vec<f32>>)
+        let modifications_col = vec_vec_f32_to_list_column("modifications", &self.modifications)
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to build modifications column: {}", e)))?;
+
+        // Build fragment list columns
+        let frag_charges_col = vec_vec_i32_to_list_column("frag_charges", &self.frag_charges)
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to build frag_charges column: {}", e)))?;
+        let frag_kinds_col = vec_vec_string_to_list_column("frag_kinds", &self.frag_kinds)
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to build frag_kinds column: {}", e)))?;
+        let frag_ordinals_col = vec_vec_i32_to_list_column("frag_fragment_ordinals", &self.frag_fragment_ordinals)
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to build frag_fragment_ordinals column: {}", e)))?;
+        let frag_intensities_col = vec_vec_f32_to_list_column("frag_intensities", &self.frag_intensities)
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to build frag_intensities column: {}", e)))?;
+        let frag_mz_calc_col = vec_vec_f32_to_list_column("frag_mz_calculated", &self.frag_mz_calculated)
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to build frag_mz_calculated column: {}", e)))?;
+        let frag_mz_exp_col = vec_vec_f32_to_list_column("frag_mz_experimental", &self.frag_mz_experimental)
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to build frag_mz_experimental column: {}", e)))?;
+
+        // Combine all columns
+        let mut all_columns = columns;
+        all_columns.push(modifications_col);
+        all_columns.push(frag_charges_col);
+        all_columns.push(frag_kinds_col);
+        all_columns.push(frag_ordinals_col);
+        all_columns.push(frag_intensities_col);
+        all_columns.push(frag_mz_calc_col);
+        all_columns.push(frag_mz_exp_col);
+
+        // Create DataFrame
+        let df = DataFrame::new(all_columns)
+            .map_err(|e| PyRuntimeError::new_err(format!("DataFrame creation failed: {}", e)))?;
+
+        Ok(PyDataFrame(df))
+    }
 }
 
 #[pymethods]

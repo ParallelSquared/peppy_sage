@@ -38,7 +38,7 @@ def test_spectrum_build():
 
     proton_mass = 1.0072764
     # 1. Precursor setup
-    precursor = ps.Precursor(mz=(956.55240+proton_mass)/2, charge=0, isolation_window=(-2.4, 2.4))
+    precursor = ps.Precursor(mz=(956.55240+proton_mass)/2, charge=0, isolation_window=(-1000000, 100000))
     #precursor = ps.Precursor(mz=(1056.55240+proton_mass)/2, charge=0, isolation_window=(-2.4, 2.4))
 
     # 2. Peak data
