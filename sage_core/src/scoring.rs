@@ -422,46 +422,11 @@ impl<'db> Scorer<'db> {
 
     fn initial_hits(&self, query: &ProcessedSpectrum<Peak>, precursor: &Precursor) -> InitialHits {
         // Sage operates on masses without protons; [M] instead of [MH+]
+        // Library peptides are indexed by M/z, so query directly with mz
         let mz = precursor.mz - PROTON;
+        let charge = precursor.charge.unwrap_or(0);
 
-        // Search in wide-window/DIA mode
-        let mut hits = if self.wide_window {
-            (self.min_precursor_charge..=self.max_precursor_charge).fold(
-                InitialHits::default(),
-                |mut hits, precursor_charge| {
-                    let precursor_mass = mz * precursor_charge as f32;
-                    let precursor_tol = precursor
-                        .isolation_window
-                        .unwrap_or(Tolerance::Da(-2.4, 2.4))
-                        * precursor_charge as f32;
-                    hits +=
-                        self.matched_peaks(query, precursor_mass, precursor_charge, precursor_tol);
-                    hits
-                },
-            )
-        } else if precursor.charge.is_some() && self.override_precursor_charge == false {
-            let charge = precursor.charge.unwrap();
-            // Charge state is already annotated for this precusor, only search once
-            let precursor_mass = mz * charge as f32;
-            self.matched_peaks(query, precursor_mass, charge, self.precursor_tol)
-        } else {
-            // Not all selected ion precursors have charge states annotated (or user has set
-            // `override_precursor_charge`)
-            // assume it could be z=2, z=3, z=4 and search all three
-            (self.min_precursor_charge..=self.max_precursor_charge).fold(
-                InitialHits::default(),
-                |mut hits, precursor_charge| {
-                    let precursor_mass = mz * precursor_charge as f32;
-                    hits += self.matched_peaks(
-                        query,
-                        precursor_mass,
-                        precursor_charge,
-                        self.precursor_tol,
-                    );
-                    hits
-                },
-            )
-        };
+        let mut hits = self.matched_peaks(query, mz, charge, self.precursor_tol);
         let peptide_counts: std::collections::HashMap<PeptideIx, usize> =
             hits.preliminary.iter()
                 .filter(|p| p.peptide != PeptideIx::default())
@@ -520,7 +485,7 @@ impl<'db> Scorer<'db> {
             let psm_id = increment_psm_counter();
 
             let peptide = &self.db[score.peptide];
-            let precursor_mass = mz * score.precursor_charge as f32;
+            let precursor_mass = mz;
 
             let next = score_vector
                 .get(idx + 1)
@@ -542,11 +507,9 @@ impl<'db> Scorer<'db> {
             }
 
             let isotope_error = score.isotope_error as f32 * NEUTRON;
-            // For library mode with charge-aware indexing, monoisotopic stores precursor m/z
-            // Convert back to neutral mass for output
+            // monoisotopic stores M/z; convert back to neutral mass for output
             let calcmass = if let Some(z) = peptide.precursor_charge {
-                let z_f32 = z as f32;
-                peptide.monoisotopic * z_f32 - z_f32 * PROTON
+                peptide.monoisotopic * z as f32
             } else {
                 peptide.monoisotopic
             };

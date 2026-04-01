@@ -359,8 +359,8 @@ pub fn build_indexed_database_from_library(
 
         let mono = mono_from_seq_and_mods(&seq, &mods_vec);
 
-        // Calculate precursor m/z for charge-state-aware indexing
-        let precursor_mz = (mono + precursor_z as f32 * PROTON) / precursor_z as f32;
+        // Store M/z to match Sage's internal convention (mz = precursor.mz - PROTON)
+        let precursor_mz = mono / precursor_z as f32;
 
         let seq_bytes: Arc<[u8]> = seq.clone().into_bytes().into_boxed_slice().into();
 
