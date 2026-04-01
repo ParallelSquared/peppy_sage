@@ -76,17 +76,14 @@ class Spectrum:
             total_ion_current: Optional total ion current; computed automatically if None
         """
 
-        mz_array = np.asarray(mz_array, dtype=float)
-        intensity_array = np.asarray(intensity_array, dtype=float)
+        mz_array = np.asarray(mz_array, dtype=np.float32, order="C")
+        intensity_array = np.asarray(intensity_array, dtype=np.float32, order="C")
 
         if mz_array.shape != intensity_array.shape:
             raise ValueError("mz_array and intensity_array must be the same length.")
 
         if total_ion_current is None:
             total_ion_current = float(np.sum(intensity_array))
-
-        mz_array   = np.asarray(mz_array, dtype=np.float32, order="C")
-        intensity_array = np.asarray(intensity_array, dtype=np.float32, order="C")
 
         self._inner = _rust.PyProcessedSpectrum(
             id,

@@ -421,9 +421,8 @@ impl<'db> Scorer<'db> {
     }
 
     fn initial_hits(&self, query: &ProcessedSpectrum<Peak>, precursor: &Precursor) -> InitialHits {
-        // Sage operates on masses without protons; [M] instead of [MH+]
-        // Library peptides are indexed by M/z, so query directly with mz
-        let mz = precursor.mz - PROTON;
+        // Library peptides are indexed by precursor m/z directly
+        let mz = precursor.mz;
         let charge = precursor.charge.unwrap_or(0);
 
         let mut hits = self.matched_peaks(query, mz, charge, self.precursor_tol);
@@ -470,14 +469,14 @@ impl<'db> Scorer<'db> {
             .collect::<Vec<_>>();
 
         // Hyperscore is our primary score function for PSMs
-        score_vector.sort_by(|a, b| b.0.hyperscore.total_cmp(&a.0.hyperscore));
+        score_vector.sort_by(|a, b| {
+            b.0.hyperscore.total_cmp(&a.0.hyperscore)
+                .then(a.0.peptide.0.cmp(&b.0.peptide.0))
+        });
 
         // Expected value for poisson distribution
         // (average # of matches peaks/peptide candidate)
         let lambda = hits.matched_peaks as f64 / hits.scored_candidates as f64;
-
-        // Sage operates on masses without protons; [M] instead of [MH+]
-        let mz = precursor.mz - PROTON;
 
         for idx in 0..report_psms.min(score_vector.len()) {
             let score = score_vector[idx].0;
@@ -485,7 +484,8 @@ impl<'db> Scorer<'db> {
             let psm_id = increment_psm_counter();
 
             let peptide = &self.db[score.peptide];
-            let precursor_mass = mz;
+            // Convert precursor m/z to neutral mass for output
+            let precursor_mass = (precursor.mz - PROTON) * score.precursor_charge as f32;
 
             let next = score_vector
                 .get(idx + 1)
@@ -507,9 +507,10 @@ impl<'db> Scorer<'db> {
             }
 
             let isotope_error = score.isotope_error as f32 * NEUTRON;
-            // monoisotopic stores M/z; convert back to neutral mass for output
+            // monoisotopic stores precursor m/z (M+zH)/z; convert to neutral mass for output
             let calcmass = if let Some(z) = peptide.precursor_charge {
-                peptide.monoisotopic * z as f32
+                let z_f32 = z as f32;
+                peptide.monoisotopic * z_f32 - z_f32 * PROTON
             } else {
                 peptide.monoisotopic
             };
@@ -530,7 +531,7 @@ impl<'db> Scorer<'db> {
                 expmass: precursor_mass,
                 calcmass,
                 // Features
-                charge: score.precursor_charge,
+                charge: peptide.precursor_charge.unwrap_or(score.precursor_charge),
                 rt: query.scan_start_time,
                 ims: query
                     .precursors
@@ -705,7 +706,7 @@ impl<'db> Scorer<'db> {
                 }
             }
 
-            score.hyperscore = score.hyperscore(self.score_type);
+            score.hyperscore = (score.hyperscore(self.score_type) * 1e4).round() / 1e4;
             score.longest_b = b_run.longest;
             score.longest_y = y_run.longest;
             score.ppm_difference /= score.summed_b + score.summed_y;

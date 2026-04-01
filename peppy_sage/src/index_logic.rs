@@ -10,7 +10,7 @@ use rayon::prelude::*;
 use pyo3_polars::PyDataFrame;
 use polars::prelude::*;
 use pyo3::pyclass::boolean_struct::False;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use sage_core::mass::{monoisotopic as aa_mono, H2O, PROTON};
 // Add imports for types used in the original logic (e.g., DashSet, FnvBuildHasher, etc. if you copied that part)
 
@@ -188,13 +188,17 @@ pub fn build_indexed_database_from_library(
         .column("PrecursorCharge")
         .expect("library missing required column 'PrecursorCharge'");
 
-    // 1) Collect unique peptides: (ModifiedPeptide, PrecursorCharge) -> (StrippedPeptide, mods_vec)
-    let mut pep_mods: HashMap<(String, i32), (String, Vec<f32>)> = HashMap::new();
+    let precursor_mz_col = df
+        .column("PrecursorMz")
+        .expect("library missing required column 'PrecursorMz'");
+
+    // 1) Collect unique peptides: (ModifiedPeptide, PrecursorCharge) -> (StrippedPeptide, mods_vec, precursor_mz)
+    let mut pep_mods: BTreeMap<(String, i32), (String, Vec<f32>, f32)> = BTreeMap::new();
 
     // 2) Aggregate ions per precursor charge state:
     // key = (ModifiedPeptide, PrecursorCharge, FragmentType, FragmentNumber, FragmentCharge)
     // value = (mz_sum, intensity_sum, count)
-    let mut ion_agg: HashMap<(String, i32, String, i32, i32), (f32, f32, u32)> = HashMap::new();
+    let mut ion_agg: BTreeMap<(String, i32, String, i32, i32), (f32, f32, u32)> = BTreeMap::new();
 
     for idx in 0..n_rows {
         // -------- peptide-level stuff --------
@@ -232,6 +236,12 @@ pub fn build_indexed_database_from_library(
             ),
         };
 
+        // 2c) Read PrecursorMz
+        let precursor_mz_val = precursor_mz_col
+            .get(idx)
+            .unwrap_or_else(|_| panic!("null 'PrecursorMz' at row {}", idx));
+        let precursor_mz: f32 = anyvalue_to_f32(&precursor_mz_val, "PrecursorMz", idx);
+
         // 3) Determine mods_vec
         let mods_vec: Vec<f32> = if let Some(mods_col) = &mods_col_opt {
             // ---- CASE A: user provided explicit masses ----
@@ -265,10 +275,6 @@ pub fn build_indexed_database_from_library(
         };
 
         // 4) Store peptide once using (ModifiedPeptide, PrecursorCharge) as the key
-        pep_mods
-            .entry((modified.clone(), precursor_z))
-            .or_insert_with(|| (seq.clone(), mods_vec.clone()));
-
         if mods_vec.len() != seq.len() + 2 {
             panic!(
                 "modifications length {} != sequence length + 2 ({}) at row {} (seq='{}')",
@@ -279,10 +285,9 @@ pub fn build_indexed_database_from_library(
             );
         }
 
-        // store peptide info once per (ModifiedPeptide, PrecursorCharge)
         pep_mods
             .entry((modified.clone(), precursor_z))
-            .or_insert_with(|| (seq.clone(), mods_vec.clone()));
+            .or_insert_with(|| (seq.clone(), mods_vec.clone(), precursor_mz));
 
         // -------- fragment-level stuff (for aggregation) --------
         let frag_type_val = frag_type_col
@@ -341,9 +346,9 @@ pub fn build_indexed_database_from_library(
 
     // -------- build peptides (unique per (ModifiedPeptide, PrecursorCharge)) --------
     let mut peptides: Vec<Peptide> = Vec::with_capacity(pep_mods.len());
-    let mut pep_index: HashMap<(String, i32), PeptideIx> = HashMap::with_capacity(pep_mods.len());
+    let mut pep_index: BTreeMap<(String, i32), PeptideIx> = BTreeMap::new();
 
-    for ((modified, precursor_z), (seq, mods_vec)) in pep_mods {
+    for ((modified, precursor_z), (seq, mods_vec, precursor_mz)) in pep_mods {
         let n = seq.len();
         if mods_vec.len() != n + 2 {
             panic!(
@@ -357,16 +362,11 @@ pub fn build_indexed_database_from_library(
         let cterm = mods_vec[mods_vec.len() - 1];
         let per_res_mods = mods_vec[1..mods_vec.len() - 1].to_vec();
 
-        let mono = mono_from_seq_and_mods(&seq, &mods_vec);
-
-        // Store M/z to match Sage's internal convention (mz = precursor.mz - PROTON)
-        let precursor_mz = mono / precursor_z as f32;
-
         let seq_bytes: Arc<[u8]> = seq.clone().into_bytes().into_boxed_slice().into();
 
         let peptide = Peptide {
             sequence: seq_bytes,
-            monoisotopic: precursor_mz,  // Store precursor m/z for indexing
+            monoisotopic: precursor_mz,  // Store precursor m/z directly from library
             proteins: vec![Arc::from("LIBRARY".to_string())],
             decoy: false,
             modifications: per_res_mods,
@@ -454,7 +454,10 @@ pub fn build_indexed_database_from_library(
 
     // -------- sort + bucket fragments as before --------
 
-    fragments.par_sort_unstable_by(|a, b| a.fragment_mz.total_cmp(&b.fragment_mz));
+    fragments.par_sort_by(|a, b| {
+        a.fragment_mz.total_cmp(&b.fragment_mz)
+            .then(a.peptide_index.0.cmp(&b.peptide_index.0))
+    });
 
     let min_value = if fragments.is_empty() {
         Vec::new()
@@ -463,7 +466,7 @@ pub fn build_indexed_database_from_library(
             .par_chunks_mut(config.bucket_size)
             .map(|chunk| {
                 let min = chunk[0].fragment_mz;
-                chunk.par_sort_unstable_by(|a, b| a.peptide_index.cmp(&b.peptide_index));
+                chunk.par_sort_by(|a, b| a.peptide_index.cmp(&b.peptide_index));
                 min
             })
             .collect::<Vec<_>>()
@@ -595,7 +598,7 @@ fn reorder_library_mode(
 
     // perm[new] = old, sorted by precursor monoisotopic mass
     let mut perm: Vec<usize> = (0..n).collect();
-    perm.par_sort_unstable_by(|&a, &b| {
+    perm.par_sort_by(|&a, &b| {
         peptides[a]
             .monoisotopic
             .total_cmp(&peptides[b].monoisotopic)

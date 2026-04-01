@@ -51,8 +51,11 @@ def _build_library_df(charges):
     n = len(SEQUENCE)
     mods = [0.0] * (n + 2)  # no modifications
 
+    neutral = _neutral_mass()
+
     rows = []
     for z in charges:
+        prec_mz = _precursor_mz(neutral, z)
         b_mzs = _b_ion_mzs(SEQUENCE)
         y_mzs = _y_ion_mzs(SEQUENCE)
 
@@ -61,6 +64,7 @@ def _build_library_df(charges):
                 "StrippedPeptide": SEQUENCE,
                 "ModifiedPeptide": SEQUENCE,
                 "PrecursorCharge": z,
+                "PrecursorMz": prec_mz,
                 "FragmentType": "b",
                 "FragmentSeriesNumber": i + 1,
                 "FragmentCharge": 1,
@@ -73,6 +77,7 @@ def _build_library_df(charges):
                 "StrippedPeptide": SEQUENCE,
                 "ModifiedPeptide": SEQUENCE,
                 "PrecursorCharge": z,
+                "PrecursorMz": prec_mz,
                 "FragmentType": "y",
                 "FragmentSeriesNumber": i + 1,
                 "FragmentCharge": 1,
@@ -155,10 +160,8 @@ def test_z2_spectrum_matches_z2_entry_only():
 
     neutral = _neutral_mass()
     mz = _precursor_mz(neutral, 2)
-    sage_mz = mz - PROTON  # M/z, Sage internal convention
     print(f"\n  Neutral mass: {neutral:.5f}")
     print(f"  Precursor m/z (z=2): {mz:.5f}")
-    print(f"  Sage internal mz (mz - PROTON): {sage_mz:.5f}")
     print(f"  DB peptides: {[p.sequence for p in db.peptides]}")
 
     df = _score(db, spectrum_z2)
@@ -184,10 +187,8 @@ def test_z3_spectrum_matches_z3_entry_only():
 
     neutral = _neutral_mass()
     mz = _precursor_mz(neutral, 3)
-    sage_mz = mz - PROTON
     print(f"\n  Neutral mass: {neutral:.5f}")
     print(f"  Precursor m/z (z=3): {mz:.5f}")
-    print(f"  Sage internal mz (mz - PROTON): {sage_mz:.5f}")
     print(f"  DB peptides: {[p.sequence for p in db.peptides]}")
 
     df = _score(db, spectrum_z3)
