@@ -226,6 +226,110 @@ def test_calcmass_is_neutral_mass():
     )
 
 
+def _b_ion_mz_at_charge(sequence, frag_charge):
+    """Compute b-ion m/z values at a given fragment charge state."""
+    mzs = []
+    cumulative = 0.0
+    for i in range(1, len(sequence)):
+        cumulative += pyteomass.calculate_mass(sequence=sequence[i - 1:i])
+        mzs.append((cumulative + frag_charge * PROTON) / frag_charge)
+    return mzs
+
+
+def _y_ion_mz_at_charge(sequence, frag_charge):
+    """Compute y-ion m/z values at a given fragment charge state."""
+    mzs = []
+    for i in range(1, len(sequence)):
+        suffix = sequence[len(sequence) - i:]
+        neutral = pyteomass.calculate_mass(sequence=suffix)
+        mzs.append((neutral + frag_charge * PROTON) / frag_charge)
+    return mzs
+
+
+def test_mixed_charge_fragments():
+    """Library has both z=1 and z=2 fragment ions for the same peptide.
+    Spectrum contains peaks at both z=1 and z=2 m/z values.
+    All should be matched at their library m/z without decharging."""
+    n = len(SEQUENCE)
+    mods = [0.0] * (n + 2)
+    neutral = _neutral_mass()
+    prec_mz = _precursor_mz(neutral, 2)
+
+    # Build library with z=1 b-ions and z=2 y-ions
+    rows = []
+    for i, mz in enumerate(_b_ion_mzs(SEQUENCE)):  # z=1 b-ions
+        rows.append({
+            "StrippedPeptide": SEQUENCE,
+            "ModifiedPeptide": SEQUENCE,
+            "PrecursorCharge": 2,
+            "PrecursorMz": prec_mz,
+            "FragmentType": "b",
+            "FragmentSeriesNumber": i + 1,
+            "FragmentCharge": 1,
+            "FragmentMz": mz,
+            "RelativeIntensity": 100.0,
+        })
+    for i, mz in enumerate(_y_ion_mz_at_charge(SEQUENCE, 2)):  # z=2 y-ions
+        rows.append({
+            "StrippedPeptide": SEQUENCE,
+            "ModifiedPeptide": SEQUENCE,
+            "PrecursorCharge": 2,
+            "PrecursorMz": prec_mz,
+            "FragmentType": "y",
+            "FragmentSeriesNumber": i + 1,
+            "FragmentCharge": 2,
+            "FragmentMz": mz,
+            "RelativeIntensity": 100.0,
+        })
+
+    df = pl.DataFrame(rows)
+    df = df.with_columns(
+        pl.Series("Modifications", [mods] * len(rows), dtype=pl.List(pl.Float32))
+    )
+
+    db = ps.IndexedDatabase.from_library(
+        library=df,
+        bucket_size=128,
+        ion_kinds=["b", "y"],
+        min_ion_index=0,
+        generate_decoys=False,
+        decoy_tag="rev_",
+        peptide_min_mass=0.0,
+        peptide_max_mass=5000.0,
+    )
+
+    # Spectrum with z=1 b-ion peaks and z=2 y-ion peaks
+    b_peaks = _b_ion_mzs(SEQUENCE)                    # z=1 m/z
+    y_peaks = _y_ion_mz_at_charge(SEQUENCE, 2)        # z=2 m/z
+    all_peaks = sorted(b_peaks + y_peaks)
+    intensities = [100.0] * len(all_peaks)
+
+    precursor = ps.Precursor(mz=prec_mz, charge=2, isolation_window=(-2.4, 2.4))
+    spectrum = ps.Spectrum(
+        id="Scan_mixed_frag_charges",
+        file_id=1,
+        scan_start_time=10.0,
+        mz_array=all_peaks,
+        intensity_array=intensities,
+        precursors=[precursor],
+    )
+
+    df_result = _score(db, spectrum)
+    print(f"\n  Matches: {len(df_result)}")
+    assert len(df_result) >= 1, "Expected at least one match"
+
+    matched = df_result["matched_peaks"][0]
+    print(f"  matched_peaks: {matched}")
+    print(f"  hyperscore: {df_result['hyperscore'][0]}")
+
+    # 7 b-ions (z=1) + 7 y-ions (z=2) = 14 total
+    # If decharging occurred, the z=2 y-ions would be looked up at the wrong m/z
+    assert matched == 14, (
+        f"Expected 14 matched peaks (7 b@z1 + 7 y@z2), got {matched}. "
+        f"Fragment ions may be getting decharged."
+    )
+
+
 if __name__ == "__main__":
     test_separate_charge_state_entries()
     print("PASS: test_separate_charge_state_entries")
