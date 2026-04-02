@@ -421,11 +421,47 @@ impl<'db> Scorer<'db> {
     }
 
     fn initial_hits(&self, query: &ProcessedSpectrum<Peak>, precursor: &Precursor) -> InitialHits {
-        // Library peptides are indexed by precursor m/z directly
-        let mz = precursor.mz;
-        let charge = precursor.charge.unwrap_or(0);
+        // Sage operates on masses without protons; [M] instead of [MH+]
+        let mz = precursor.mz - PROTON;
 
-        let mut hits = self.matched_peaks(query, mz, charge, self.precursor_tol);
+        // Search in wide-window/DIA mode
+        let mut hits = if self.wide_window {
+            (self.min_precursor_charge..=self.max_precursor_charge).fold(
+                InitialHits::default(),
+                |mut hits, precursor_charge| {
+                    let precursor_mass = mz * precursor_charge as f32;
+                    let precursor_tol = precursor
+                        .isolation_window
+                        .unwrap_or(Tolerance::Da(-2.4, 2.4))
+                        * precursor_charge as f32;
+                    hits +=
+                        self.matched_peaks(query, precursor_mass, precursor_charge, precursor_tol);
+                    hits
+                },
+            )
+        } else if precursor.charge.is_some() && self.override_precursor_charge == false {
+            let charge = precursor.charge.unwrap();
+            // Charge state is already annotated for this precusor, only search once
+            let precursor_mass = mz * charge as f32;
+            self.matched_peaks(query, precursor_mass, charge, self.precursor_tol)
+        } else {
+            // Not all selected ion precursors have charge states annotated (or user has set
+            // `override_precursor_charge`)
+            // assume it could be z=2, z=3, z=4 and search all three
+            (self.min_precursor_charge..=self.max_precursor_charge).fold(
+                InitialHits::default(),
+                |mut hits, precursor_charge| {
+                    let precursor_mass = mz * precursor_charge as f32;
+                    hits += self.matched_peaks(
+                        query,
+                        precursor_mass,
+                        precursor_charge,
+                        self.precursor_tol,
+                    );
+                    hits
+                },
+            )
+        };
         let peptide_counts: std::collections::HashMap<PeptideIx, usize> =
             hits.preliminary.iter()
                 .filter(|p| p.peptide != PeptideIx::default())
@@ -478,14 +514,16 @@ impl<'db> Scorer<'db> {
         // (average # of matches peaks/peptide candidate)
         let lambda = hits.matched_peaks as f64 / hits.scored_candidates as f64;
 
+        // Sage operates on masses without protons; [M] instead of [MH+]
+        let mz = precursor.mz - PROTON;
+
         for idx in 0..report_psms.min(score_vector.len()) {
             let score = score_vector[idx].0;
             let fragments: Option<Fragments> = score_vector[idx].1.take();
             let psm_id = increment_psm_counter();
 
             let peptide = &self.db[score.peptide];
-            // Convert precursor m/z to neutral mass for output
-            let precursor_mass = (precursor.mz - PROTON) * score.precursor_charge as f32;
+            let precursor_mass = mz * score.precursor_charge as f32;
 
             let next = score_vector
                 .get(idx + 1)
@@ -507,16 +545,8 @@ impl<'db> Scorer<'db> {
             }
 
             let isotope_error = score.isotope_error as f32 * NEUTRON;
-            // monoisotopic stores precursor m/z (M+zH)/z; convert to neutral mass for output
-            let calcmass = if let Some(z) = peptide.precursor_charge {
-                let z_f32 = z as f32;
-                peptide.monoisotopic * z_f32 - z_f32 * PROTON
-            } else {
-                peptide.monoisotopic
-            };
-
-            let delta_mass = (precursor_mass - calcmass - isotope_error) * 2E6
-                / (precursor_mass - isotope_error + calcmass);
+            let delta_mass = (precursor_mass - peptide.monoisotopic - isotope_error) * 2E6
+                / (precursor_mass - isotope_error + peptide.monoisotopic);
 
             // let (num_proteins, proteins) = self.db.assign_proteins(peptide);
 
@@ -529,9 +559,9 @@ impl<'db> Scorer<'db> {
                 rank: idx as u32 + 1,
                 label: peptide.label(),
                 expmass: precursor_mass,
-                calcmass,
+                calcmass: peptide.monoisotopic,
                 // Features
-                charge: peptide.precursor_charge.unwrap_or(score.precursor_charge),
+                charge: score.precursor_charge,
                 rt: query.scan_start_time,
                 ims: query
                     .precursors
