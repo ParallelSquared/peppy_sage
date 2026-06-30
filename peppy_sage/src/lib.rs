@@ -24,6 +24,19 @@ use polars::prelude::*;
 use std::fs::File;
 
 
+/// Extract a human-readable message from a panic payload returned by
+/// `catch_unwind`. Panics carry `&'static str` or `String` payloads in
+/// practice; fall back to a generic note for anything else.
+fn panic_payload_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "<non-string panic payload>".to_string()
+    }
+}
+
 // Import ONLY the native Rust types from sage_core
 use sage_core::database::{IndexedDatabase, PeptideIx, Theoretical};
 use sage_core::enzyme::Position;
@@ -466,9 +479,10 @@ impl PyIndexedDatabase {
 
         match result {
             Ok(db) => Ok(PyIndexedDatabase { inner: Arc::new(db) }), // ✅ wrap once here
-            Err(_) => Err(PyRuntimeError::new_err(
-                "Rust panic occurred during indexed database generation.",
-            )),
+            Err(payload) => Err(PyRuntimeError::new_err(format!(
+                "Rust panic during indexed database generation: {}",
+                panic_payload_message(payload),
+            ))),
         }
     }
 
@@ -517,9 +531,10 @@ impl PyIndexedDatabase {
 
         match result {
             Ok(db) => Ok(PyIndexedDatabase { inner: Arc::new(db) }),
-            Err(_) => Err(PyRuntimeError::new_err(
-                "Rust panic occurred during indexed database generation from library.",
-            )),
+            Err(payload) => Err(PyRuntimeError::new_err(format!(
+                "Rust panic during indexed database generation from library: {}",
+                panic_payload_message(payload),
+            ))),
         }
     }
 
