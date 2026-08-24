@@ -155,6 +155,9 @@ pub struct Fragments {
     pub intensities: Vec<f32>,
     pub mz_calculated: Vec<f32>,
     pub mz_experimental: Vec<f32>,
+    /// Per-matched-fragment ion mobility, copied from the matched experimental peak.
+    /// Zero when the source spectrum has no mobility dimension.
+    pub mobilities: Vec<f32>,
 }
 
 static PSM_COUNTER: AtomicUsize = AtomicUsize::new(1);
@@ -732,6 +735,7 @@ impl<'db> Scorer<'db> {
                         fragments_details.mz_calculated.push(calc_mz);
                         fragments_details.fragment_ordinals.push(ord);
                         fragments_details.intensities.push(peak.intensity);
+                        fragments_details.mobilities.push(peak.mobility);
                     }
                 }
             }
@@ -801,6 +805,7 @@ impl<'db> Scorer<'db> {
                         fragments_details.mz_calculated.push(calc_mz);
                         fragments_details.fragment_ordinals.push(ord);
                         fragments_details.intensities.push(peak.intensity);
+                        fragments_details.mobilities.push(peak.mobility);
                     }
                 }
             }

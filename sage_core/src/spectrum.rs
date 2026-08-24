@@ -6,6 +6,9 @@ use crate::mass::{Tolerance, NEUTRON, PROTON};
 pub struct Peak {
     pub intensity: f32,
     pub mass: f32,
+    /// Optional per-peak ion mobility. Defaults to 0.0 when the source data has
+    /// no mobility dimension; carried through so matched fragments can report it.
+    pub mobility: f32,
 }
 
 impl Eq for Peak {}
@@ -345,6 +348,7 @@ impl SpectrumProcessor {
                     Peak {
                         mass,
                         intensity: peak.intensity,
+                        mobility: 0.0,
                     }
                 })
                 .take(self.take_top_n)
@@ -356,7 +360,7 @@ impl SpectrumProcessor {
                 .zip(spectrum.intensity.iter())
                 .map(|(mz, &intensity)| {
                     let mass = (mz - PROTON) * 1.0;
-                    Peak { mass, intensity }
+                    Peak { mass, intensity, mobility: 0.0 }
                 })
                 .collect::<Vec<_>>();
             crate::heap::bounded_min_heapify(&mut peaks, self.take_top_n);
@@ -374,7 +378,7 @@ impl SpectrumProcessor {
                 .zip(spectrum.intensity.iter())
                 .map(|(&mass, &intensity)| {
                     let mass = (mass - PROTON) * 1.0;
-                    Peak { mass, intensity }
+                    Peak { mass, intensity, mobility: 0.0 }
                 })
                 .collect::<Vec<_>>(),
         };

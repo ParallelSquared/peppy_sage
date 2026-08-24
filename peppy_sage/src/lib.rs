@@ -224,6 +224,8 @@ pub struct PyFeatureArrays {
     pub frag_mz_calculated: Vec<Vec<f32>>,
     #[pyo3(get)]
     pub frag_mz_experimental: Vec<Vec<f32>>,
+    #[pyo3(get)]
+    pub frag_mobilities: Vec<Vec<f32>>,
 }
 
 /// Iterates over the raw features, looks up the associated Peptide data,
@@ -282,6 +284,7 @@ fn features_to_arrays(
     arrays.frag_intensities.reserve(total_features);
     arrays.frag_mz_calculated.reserve(total_features);
     arrays.frag_mz_experimental.reserve(total_features);
+    arrays.frag_mobilities.reserve(total_features);
 
 
     // Iterate through the features and extract data
@@ -377,6 +380,7 @@ fn features_to_arrays(
             arrays.frag_intensities.push(frags.intensities.clone());
             arrays.frag_mz_calculated.push(frags.mz_calculated.clone());
             arrays.frag_mz_experimental.push(frags.mz_experimental.clone());
+            arrays.frag_mobilities.push(frags.mobilities.clone());
         } else {
             // No fragments: store empty lists so the column lengths still match
             arrays.frag_charges.push(Vec::new());
@@ -385,6 +389,7 @@ fn features_to_arrays(
             arrays.frag_intensities.push(Vec::new());
             arrays.frag_mz_calculated.push(Vec::new());
             arrays.frag_mz_experimental.push(Vec::new());
+            arrays.frag_mobilities.push(Vec::new());
         }
     }
 
@@ -853,6 +858,11 @@ impl PyFragments {
         self.inner.mz_experimental.clone()
     }
 
+    #[getter]
+    pub fn mobilities(&self) -> Vec<f32> {
+        self.inner.mobilities.clone()
+    }
+
     /// Optional helper: return as Python dict for easier pandas conversion
     pub fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let dict = PyDict::new(py);
@@ -862,6 +872,7 @@ impl PyFragments {
         dict.set_item("intensities", self.intensities())?;
         dict.set_item("mz_calculated", self.mz_calculated())?;
         dict.set_item("mz_experimental", self.mz_experimental())?;
+        dict.set_item("mobilities", self.mobilities())?;
         Ok(dict)
     }
 }
@@ -1228,6 +1239,7 @@ impl PyFeatureArrays {
         self.frag_intensities.extend(other.frag_intensities);
         self.frag_mz_calculated.extend(other.frag_mz_calculated);
         self.frag_mz_experimental.extend(other.frag_mz_experimental);
+        self.frag_mobilities.extend(other.frag_mobilities);
     }
 
     /// Provides a debugging representation for the Python object.
@@ -1300,6 +1312,7 @@ impl PyFeatureArrays {
             "frag_intensities",
             "frag_mz_calculated",
             "frag_mz_experimental",
+            "frag_mobilities",
         ]
         .into_iter()
         .map(|s| s.to_string())
@@ -1423,6 +1436,8 @@ impl PyFeatureArrays {
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to build frag_mz_calculated column: {}", e)))?;
         let frag_mz_exp_col = vec_vec_f32_to_list_column("frag_mz_experimental", &self.frag_mz_experimental)
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to build frag_mz_experimental column: {}", e)))?;
+        let frag_mobilities_col = vec_vec_f32_to_list_column("frag_mobilities", &self.frag_mobilities)
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to build frag_mobilities column: {}", e)))?;
 
         // Combine all columns
         let mut all_columns = columns;
@@ -1433,6 +1448,7 @@ impl PyFeatureArrays {
         all_columns.push(frag_intensities_col);
         all_columns.push(frag_mz_calc_col);
         all_columns.push(frag_mz_exp_col);
+        all_columns.push(frag_mobilities_col);
 
         // Create DataFrame
         let df = DataFrame::new(all_columns)
@@ -1445,7 +1461,7 @@ impl PyFeatureArrays {
 #[pymethods]
 impl PyProcessedSpectrum {
     #[new]
-    #[pyo3(signature = (id, file_id, scan_start_time, mz_array, intensity_array, precursors, total_ion_current))]
+    #[pyo3(signature = (id, file_id, scan_start_time, mz_array, intensity_array, precursors, total_ion_current, mobility_array=None))]
     pub fn new(
         id: String,
         file_id: usize,
@@ -1454,6 +1470,7 @@ impl PyProcessedSpectrum {
         intensity_array: Vec<f32>,
         precursors: Vec<PyPrecursor>,
         total_ion_current: f32,
+        mobility_array: Option<Vec<f32>>,
     ) -> PyResult<Self> {
         use pyo3::exceptions::PyValueError;
 
@@ -1463,10 +1480,27 @@ impl PyProcessedSpectrum {
             ));
         }
 
-        let peaks: Vec<Peak> = mz_array.into_iter()
-            .zip(intensity_array.into_iter())
-            .map(|(m, i)| Peak { mass: m, intensity: i })
-            .collect();
+        if let Some(ref mob) = mobility_array {
+            if mob.len() != mz_array.len() {
+                return Err(PyValueError::new_err(
+                    "mobility_array must be the same length as mz_array",
+                ));
+            }
+        }
+
+        let peaks: Vec<Peak> = match mobility_array {
+            Some(mob) => mz_array
+                .into_iter()
+                .zip(intensity_array.into_iter())
+                .zip(mob.into_iter())
+                .map(|((m, i), mo)| Peak { mass: m, intensity: i, mobility: mo })
+                .collect(),
+            None => mz_array
+                .into_iter()
+                .zip(intensity_array.into_iter())
+                .map(|(m, i)| Peak { mass: m, intensity: i, mobility: 0.0 })
+                .collect(),
+        };
 
         Ok(PyProcessedSpectrum {
             inner: Arc::new(ProcessedSpectrum {
