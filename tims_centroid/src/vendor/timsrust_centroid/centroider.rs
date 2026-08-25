@@ -1,4 +1,3 @@
-use rustc_hash::FxHashMap;
 use timsrust_core::utils::vec::arg_max;
 
 use crate::vendor::timsrust_centroid::{

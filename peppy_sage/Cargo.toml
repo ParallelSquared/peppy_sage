@@ -14,7 +14,9 @@ pyo3 = { version = "0.26", features = ["extension-module", "abi3-py311"] }
 dashmap = "5.5.3"
 fnv = "1.0.7"
 pyo3-polars = "0.25"
-polars = "*"
+# Must track the version pyo3-polars is built against, or two incompatible
+# polars crates end up in the graph and DataFrame stops matching PyDataFrame.
+polars = "0.52"
 serde = { version = "1", features = ["derive"] }
 
 tims_centroid = { path = "../tims_centroid" }

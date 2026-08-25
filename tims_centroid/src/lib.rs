@@ -28,7 +28,7 @@ use timsrust::{ImConverter, MzConverter, RtConverter};
 use crate::vendor::timsrust_centroid::{PeakReader, TimsError, TimsResult};
 use timsrust_core::io::formats::parquet::ParquetWriter;
 use timsrust_core::utils::thread::Synced;
-use timsrust_core::{Converter, ConvertibleTo, FrameIndex, ScanIndex, TofIndex};
+use timsrust_core::{ConvertibleTo, FrameIndex, ScanIndex, TofIndex};
 use timsrust_tdf::TdfFrameReader;
 
 use crate::calibration::{CalibrationTables, TimsDataLib};

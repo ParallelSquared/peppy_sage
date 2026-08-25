@@ -1,6 +1,5 @@
 use crate::vendor::timsrust_centroid::{TimsError, TimsResult, centroider::FrameCentroider};
 use rayon::prelude::*;
-use rustc_hash::FxHashMap;
 use timsrust_core::utils::reader::{IndexedReader, Reader};
 use timsrust_core::utils::thread::Synced;
 use timsrust_core::utils::vec::extract_kernel;
@@ -15,7 +14,6 @@ const TOF_WIDTH: usize = 32;
 const SCAN_WIDTH: usize = 256;
 
 type Grid2D = NDArray<u64, 2>;
-type TOFMap = Vec<FxHashMap<u32, u64>>;
 
 /// Represents a centroided peak in a frame.
 ///
@@ -182,31 +180,6 @@ where
     //     Ok(result)
     // }
 
-    /// Returns the transposed TOF map for the specified frame index.
-    ///
-    /// # Arguments
-    /// * `index` - Frame index.
-    ///
-    /// # Errors
-    /// Returns an error if the frame cannot be read.
-    ///
-    /// # Example
-    /// ```ignore
-    /// use timsrust_centroid::PeakReader;
-    /// let frame_reader = /* e.g. TdfFrameReader::new("example.d").unwrap() */;
-    /// let reader = PeakReader::new(frame_reader, 10.0, 5.0).unwrap();
-    /// let tofs = reader.get_transposed_tofs(0).unwrap();
-    /// ```ignore
-    pub fn get_transposed_tofs(&self, index: usize) -> TimsResult<TOFMap> {
-        if let Ok(frame) = self.frame_reader.get_frame(index) {
-            Ok(transpose_tofs(&frame))
-        } else {
-            Err(TimsError::new(format!(
-                "Failed to get transposed TOFs for frame {}",
-                index
-            )))
-        }
-    }
 
     /// Returns a reference to the average MS1 peak grid.
     ///
@@ -308,57 +281,6 @@ impl<'a> TofSlices<'a> {
     }
 }
 
-thread_local! {
-    static TOF_POOL: std::cell::RefCell<Option<TOFMap>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-#[allow(dead_code)]
-fn take_tof_map(len: usize) -> TOFMap {
-    let mut tofs = TOF_POOL
-        .with(|pool| pool.borrow_mut().take())
-        .unwrap_or_default();
-    for map in tofs.iter_mut() {
-        map.clear();
-    }
-    if tofs.len() < len {
-        tofs.resize_with(len, FxHashMap::default);
-    } else {
-        tofs.truncate(len);
-    }
-    tofs
-}
-
-pub(crate) fn recycle_tof_map(tofs: TOFMap) {
-    if tofs.is_empty() {
-        return;
-    }
-    TOF_POOL.with(|pool| *pool.borrow_mut() = Some(tofs));
-}
-
-fn transpose_tofs(frame: &Frame) -> TOFMap {
-    let max_tof = usize::from(
-        *frame
-            .ions()
-            .tof_indices()
-            .iter()
-            .max()
-            .expect("Failed to find max TOF"),
-    ) + 1;
-    let mut tofs = take_tof_map(max_tof);
-    frame.ions().scan_offsets().windows(2).enumerate().for_each(
-        |(scan_index, s)| {
-            let start = s[0];
-            let end = s[1];
-            for index in start..end {
-                let tof = usize::from(frame.ions().tof_indices()[index]);
-                let value = u64::from(frame.ions().intensities()[index]);
-                tofs[tof].insert(scan_index as u32, value);
-            }
-        },
-    );
-    tofs
-}
 
 pub fn get_average_ms1_peak<IR, InfoR>(
     frame_reader: &FrameReader<IR, InfoR>,

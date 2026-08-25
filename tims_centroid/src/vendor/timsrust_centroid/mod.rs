@@ -24,6 +24,10 @@
 //! on every call and is invoked once per tof index per frame. The changes here
 //! reuse that scratch space across calls instead. See `smoothing.rs`.
 
+// Upstream's public API is wider than we call. The unused parts are kept
+// so this stays diffable against timsrust-centroid 0.6.4.
+#![allow(dead_code)]
+
 mod buffer;
 mod centroider;
 mod error;
