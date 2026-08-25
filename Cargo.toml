@@ -1,5 +1,6 @@
 [workspace]
 members = [
     "peppy_sage",
+    "tims_centroid",
     "sage_core", # This member must be included even if you're not modifying it
 ]

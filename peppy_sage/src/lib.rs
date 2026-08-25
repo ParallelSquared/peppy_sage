@@ -1,10 +1,8 @@
 // peppysage/src/lib.rs
 
 
+
 // --- MODULES ---
-pub mod bruker_sdk;
-pub mod centroid;
-pub mod centroid_logic;
 pub mod index_logic;
 pub mod scoring_logic;
 
@@ -1735,7 +1733,7 @@ fn centroid_d(
                 *latest.lock().expect("progress mutex poisoned") = Some((done, total));
                 !cancel.load(std::sync::atomic::Ordering::Relaxed)
             };
-            let result = centroid_logic::centroid_to_parquet(
+            let result = tims_centroid::centroid_to_parquet(
                 &in_path,
                 &out_path,
                 min_ion_count_ms1,

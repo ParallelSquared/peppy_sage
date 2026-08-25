@@ -1,0 +1,19 @@
+[package]
+name = "tims_centroid"
+version = "0.1.19"
+edition = "2024"
+
+[dependencies]
+rayon = "1.5"
+serde = { version = "1", features = ["derive"] }
+rustc-hash = { version = "2", features = ["std"] }
+thiserror = "2"
+libloading = "0.8"
+
+timsrust = "0.6.4"
+timsrust-core = { version = "0.6.4", features = ["io"] }
+timsrust-tdf = "0.6.4"
+
+# Must match the version timsrust-core pulls in via filemanager: rusqlite links
+# the native sqlite3, and cargo permits only one such package in the graph.
+rusqlite = { version = "0.35", features = ["bundled"] }
