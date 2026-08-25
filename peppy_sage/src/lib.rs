@@ -1,6 +1,10 @@
 // peppysage/src/lib.rs
 
+
 // --- MODULES ---
+pub mod bruker_sdk;
+pub mod centroid;
+pub mod centroid_logic;
 pub mod index_logic;
 pub mod scoring_logic;
 
@@ -9,7 +13,7 @@ use crate::scoring_logic::{ScorerConfig, run_scoring};
 
 // --- CORE AND PY03 IMPORTS ---
 use pyo3::prelude::*;
-use pyo3::exceptions::{PyRuntimeError, PyValueError};
+use pyo3::exceptions::{PyKeyboardInterrupt, PyRuntimeError, PyValueError};
 use pyo3::types::PyString;
 use pyo3::types::PyDict;
 use pyo3::types::PyAny;
@@ -1670,6 +1674,125 @@ fn hello_py() -> PyResult<&'static str> {
     Ok("Hello from Rust + PyO3 🎉")
 }
 
+/// Centroid a timsTOF `.d` folder into a parquet peak list.
+///
+/// Mirrors the `timscentroid` CLI's parquet output, with one difference: the
+/// Bruker SDK is located at runtime via `sdk_path` rather than linked at build
+/// time, so nothing Bruker-derived ships in this wheel.
+///
+/// Args:
+///     in_path: path to the `.d` folder.
+///     out_path: parquet file to write (overwritten if present).
+///     min_ion_count_ms1: noise filter for MS1. Values below 1.0 are read as a
+///         fraction of the detected scan FWHM.
+///     min_ion_count_ms2: same, for MS2.
+///     sdk_path: path to Bruker's `timsdata` library, or a directory holding
+///         it. If omitted, an approximate calibration derived from
+///         `analysis.tdf` is used and the `mz` / `im` columns will not match an
+///         SDK-calibrated run.
+///     progress: optional callable invoked as `progress(frames_done,
+///         frames_total)` at a cadence scaled to the run length (~100 updates total), and once at the end. Drive a tqdm bar
+///         with it. Exceptions raised inside it are printed and ignored, so a
+///         broken callback cannot abort a long centroiding run.
+///
+/// Returns:
+///     Number of peaks written.
+#[pyfunction]
+#[pyo3(signature = (in_path, out_path, min_ion_count_ms1=0.5, min_ion_count_ms2=2.0, sdk_path=None, progress=None))]
+fn centroid_d(
+    py: Python<'_>,
+    in_path: &str,
+    out_path: &str,
+    min_ion_count_ms1: f64,
+    min_ion_count_ms2: f64,
+    sdk_path: Option<&str>,
+    progress: Option<Py<PyAny>>,
+) -> PyResult<usize> {
+    // Ctrl-C is the reason for the structure here. `Python::check_signals` only
+    // observes pending signals on the *main* thread, and the main thread is the
+    // one calling this function -- so it must not be the thread that blocks for
+    // the duration of the run. Instead the centroiding runs on a worker thread
+    // and the main thread stays in a poll loop, checking signals and forwarding
+    // progress until the work finishes.
+    //
+    // Cancellation is cooperative: `centroid_to_parquet` calls the callback
+    // every `progress_interval` frames and stops early when it returns false.
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    // Worker -> main thread progress, coalescing to the latest value: the main
+    // thread only needs the most recent (done, total) to update a bar.
+    let latest = Arc::new(std::sync::Mutex::new(None::<(usize, usize)>));
+    let done_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    let (in_path, out_path) = (in_path.to_owned(), out_path.to_owned());
+    let sdk_path = sdk_path.map(|s| s.to_owned());
+
+    let worker = {
+        let (cancel, latest, done_flag) =
+            (cancel.clone(), latest.clone(), done_flag.clone());
+        std::thread::spawn(move || {
+            let callback = move |done: usize, total: usize| -> bool {
+                *latest.lock().expect("progress mutex poisoned") = Some((done, total));
+                !cancel.load(std::sync::atomic::Ordering::Relaxed)
+            };
+            let result = centroid_logic::centroid_to_parquet(
+                &in_path,
+                &out_path,
+                min_ion_count_ms1,
+                min_ion_count_ms2,
+                sdk_path.as_deref(),
+                Some(&callback as &(dyn Fn(usize, usize) -> bool + Sync)),
+            );
+            done_flag.store(true, std::sync::atomic::Ordering::Release);
+            result
+        })
+    };
+
+    // Poll on the main thread. The GIL is released while sleeping so the
+    // callback's Python work (and any other thread) can proceed.
+    let mut interrupted = false;
+    let mut last_reported: Option<(usize, usize)> = None;
+    loop {
+        if done_flag.load(std::sync::atomic::Ordering::Acquire) {
+            break;
+        }
+        if !interrupted && py.check_signals().is_err() {
+            // Tell the worker to stop, then keep polling until it unwinds.
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            interrupted = true;
+        }
+        let snapshot = *latest.lock().expect("progress mutex poisoned");
+        if let (Some(cb), Some(p)) = (&progress, snapshot) {
+            if Some(p) != last_reported {
+                last_reported = Some(p);
+                if let Err(e) = cb.call1(py, (p.0, p.1)) {
+                    // A failing progress bar must not take the run down.
+                    e.print(py);
+                }
+            }
+        }
+        py.allow_threads(|| std::thread::sleep(std::time::Duration::from_millis(50)));
+    }
+
+    let result = worker
+        .join()
+        .map_err(|_| PyRuntimeError::new_err("centroiding thread panicked"))?;
+
+    if interrupted {
+        return Err(PyKeyboardInterrupt::new_err("centroiding interrupted"));
+    }
+
+    // Final progress update, so a bar ends at 100% rather than wherever the
+    // last poll happened to land.
+    if let (Some(cb), Some(p)) = (&progress, *latest.lock().expect("progress mutex poisoned")) {
+        if Some(p) != last_reported {
+            let _ = cb.call1(py, (p.0, p.1));
+        }
+    }
+
+    result.map_err(|e| PyRuntimeError::new_err(e.to_string()))
+}
+
 #[pymodule]
 fn _peppy_sage(py: Python, m: Bound<'_, PyModule>) -> PyResult<()> {
     // Register ALL classes used for I/O and configuration
@@ -1683,6 +1806,7 @@ fn _peppy_sage(py: Python, m: Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyFeature>()?; // New
 
     m.add_function(wrap_pyfunction!(hello_py, m.clone())?)?;
+    m.add_function(wrap_pyfunction!(centroid_d, m.clone())?)?;
 
     Ok(())
 }

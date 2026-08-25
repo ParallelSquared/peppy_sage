@@ -15,6 +15,27 @@ dashmap = "5.5.3"
 fnv = "1.0.7"
 pyo3-polars = "0.25"
 polars = "*"
+serde = { version = "1", features = ["derive"] }
+
+# timsTOF centroiding.
+#
+# These crates are Apache-2.0 while this one is MIT. They are dependencies, not
+# vendored source, so nothing of theirs is copied into this tree.
+#
+# The `sdk` feature of `timsrust` is deliberately NOT enabled: it links Bruker's
+# proprietary timsdata at build time and copies it next to the artifact, which
+# would mean redistributing it. Bruker calibration is loaded at runtime from a
+# caller-supplied path instead -- see src/bruker_sdk.rs.
+timsrust = "0.6.4"
+timsrust-core = { version = "0.6.4", features = ["io"] }
+timsrust-tdf = "0.6.4"
+rustc-hash = { version = "2", features = ["std"] }
+thiserror = "2"
+libloading = "0.8"
+
+# Must match the version timsrust-core pulls in via filemanager: rusqlite links
+# the native sqlite3, and cargo permits only one such package in the graph.
+rusqlite = { version = "0.35", features = ["bundled"] }
 
 
 [profile.release]
