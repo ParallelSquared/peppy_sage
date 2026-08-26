@@ -29,6 +29,12 @@ jobs:
           python-version: 3.11
       - name: Build wheels
         uses: PyO3/maturin-action@v1
+        env:
+          # The manylinux2014-cross gcc doesn't auto-define __ARM_ARCH, which
+          # breaks ring's pregenerated ARM assembly. Define it explicitly per
+          # target so cc-rs forwards the flag when assembling those .S files.
+          CFLAGS_aarch64_unknown_linux_gnu: "-D__ARM_ARCH=8"
+          CFLAGS_armv7_unknown_linux_gnueabihf: "-D__ARM_ARCH=7"
         with:
           target: ${{ matrix.platform.target }}
           args: --manifest-path peppy_sage/Cargo.toml --release --out dist -i python3.11
