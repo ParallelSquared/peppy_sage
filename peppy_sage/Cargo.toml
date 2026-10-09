@@ -11,6 +11,8 @@ crate-type = ["cdylib"]
 sage_core = { path = "../sage_core", package = "sage-core" }
 rayon = "1.5"
 pyo3 = { version = "0.26", features = ["extension-module", "abi3-py311"] }
+# Must track pyo3's version, or two incompatible pyo3 crates end up in the graph.
+numpy = "0.26"
 dashmap = "5.5.3"
 fnv = "1.0.7"
 pyo3-polars = "0.25"

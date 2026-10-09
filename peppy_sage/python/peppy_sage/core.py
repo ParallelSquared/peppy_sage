@@ -62,6 +62,7 @@ class Spectrum:
             intensity_array: Union[List[float], np.ndarray],
             precursors: List[Precursor],
             total_ion_current: Optional[float] = None,
+            mobility_array: Optional[Union[List[float], np.ndarray]] = None,
     ):
         """
         Create a spectrum from arrays of m/z and intensities.
@@ -74,6 +75,12 @@ class Spectrum:
             intensity_array: List or numpy array of corresponding intensities
             precursors: List of Precursor objects
             total_ion_current: Optional total ion current; computed automatically if None
+            mobility_array: Optional per-peak ion mobility. When given, matched
+                fragments report their mobility alongside m/z and intensity.
+                Omit (or pass None) for data with no mobility dimension.
+
+        Passing float32 C-contiguous numpy arrays lets Rust borrow the buffers
+        directly; any other input is copied once on the way in.
         """
 
         mz_array = np.asarray(mz_array, dtype=np.float32, order="C")
@@ -81,6 +88,11 @@ class Spectrum:
 
         if mz_array.shape != intensity_array.shape:
             raise ValueError("mz_array and intensity_array must be the same length.")
+
+        if mobility_array is not None:
+            mobility_array = np.asarray(mobility_array, dtype=np.float32, order="C")
+            if mobility_array.shape != mz_array.shape:
+                raise ValueError("mobility_array must be the same length as mz_array.")
 
         if total_ion_current is None:
             total_ion_current = float(np.sum(intensity_array))
@@ -93,6 +105,7 @@ class Spectrum:
             intensity_array,
             [p._inner for p in precursors],
             total_ion_current,
+            mobility_array,
         )
 
     # -------------------------------------------------------------------------
@@ -120,26 +133,44 @@ class Spectrum:
     def total_ion_current(self) -> float:
         return self._inner.total_ion_current
 
+    @property
+    def mobilities(self) -> Optional[np.ndarray]:
+        """Per-peak ion mobility, or None if the spectrum has no mobility dimension."""
+        mob = self._inner.mobilities
+        return None if mob is None else np.asarray(mob, dtype=np.float32)
+
     # -------------------------------------------------------------------------
     # Utilities
     # -------------------------------------------------------------------------
     def sort_peaks(self, inplace: bool = True) -> "Spectrum":
-        """Sort peaks by m/z value."""
-        peaks = sorted(self.peaks, key=lambda x: x[0])
+        """Sort peaks by m/z value.
+
+        Carries ion mobility along with the m/z and intensity it belongs to --
+        reordering the peaks without it would silently mismatch mobilities.
+        """
+        mz, ints = zip(*self.peaks) if self._inner.peaks else ((), ())
+        mz = np.asarray(mz, dtype=np.float32)
+        ints = np.asarray(ints, dtype=np.float32)
+        mob = self.mobilities
+
+        order = np.argsort(mz, kind="stable")
+        mz, ints = mz[order], ints[order]
+        if mob is not None:
+            mob = mob[order]
+
         if inplace:
-            mz, ints = zip(*peaks)
             self._inner = _rust.PyProcessedSpectrum(
                 self.id,
                 self._inner.file_id,
                 self.scan_start_time,
-                list(mz),
-                list(ints),
+                np.ascontiguousarray(mz),
+                np.ascontiguousarray(ints),
                 [p._inner for p in self.precursors],
                 self.total_ion_current,
+                None if mob is None else np.ascontiguousarray(mob),
             )
             return self
         else:
-            mz, ints = zip(*peaks)
             return Spectrum(
                 id=self.id,
                 file_id=self._inner.file_id,
@@ -148,6 +179,7 @@ class Spectrum:
                 intensity_array=ints,
                 precursors=self.precursors,
                 total_ion_current=self.total_ion_current,
+                mobility_array=mob,
             )
 
     def __repr__(self):

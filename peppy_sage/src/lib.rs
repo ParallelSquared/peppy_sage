@@ -21,6 +21,7 @@ use rayon::ThreadPoolBuilder;
 use std::sync::Arc;
 use pyo3_polars::PyDataFrame;
 use polars::prelude::*;
+use numpy::{PyArray1, PyArrayMethods, PyReadonlyArray1, PyUntypedArrayMethods};
 
 
 use std::fs::File;
@@ -1460,6 +1461,47 @@ impl PyFeatureArrays {
     }
 }
 
+/// A peak-array argument, held in whatever form avoids copying.
+///
+/// The fast path borrows a contiguous float32 numpy array directly — no
+/// per-element Python calls, no intermediate `Vec`. Anything else (a list, a
+/// non-contiguous view, a float64 array) falls back to a one-time copy so
+/// existing callers keep working.
+enum F32Input<'py> {
+    Borrowed(PyReadonlyArray1<'py, f32>),
+    Owned(Vec<f32>),
+}
+
+impl<'py> F32Input<'py> {
+    fn extract(obj: &Bound<'py, PyAny>, name: &str) -> PyResult<Self> {
+        if let Ok(arr) = obj.downcast::<PyArray1<f32>>() {
+            // Only borrow when the buffer is contiguous; `as_slice` would fail
+            // on a strided view, so copy those instead of erroring.
+            if arr.is_contiguous() {
+                return Ok(F32Input::Borrowed(arr.readonly()));
+            }
+            return Ok(F32Input::Owned(arr.readonly().as_array().iter().copied().collect()));
+        }
+        // Lists, tuples, float64 arrays, anything else sequence-like.
+        obj.extract::<Vec<f32>>()
+            .map(F32Input::Owned)
+            .map_err(|e| {
+                PyValueError::new_err(format!(
+                    "{} must be a float32 numpy array or a sequence of floats: {}",
+                    name, e
+                ))
+            })
+    }
+
+    fn as_slice(&self) -> &[f32] {
+        match self {
+            // Contiguity was checked in `extract`, so this cannot fail.
+            F32Input::Borrowed(arr) => arr.as_slice().expect("checked contiguous"),
+            F32Input::Owned(v) => v.as_slice(),
+        }
+    }
+}
+
 #[pymethods]
 impl PyProcessedSpectrum {
     #[new]
@@ -1468,39 +1510,52 @@ impl PyProcessedSpectrum {
         id: String,
         file_id: usize,
         scan_start_time: f32,
-        mz_array: Vec<f32>,
-        intensity_array: Vec<f32>,
+        mz_array: &Bound<'_, PyAny>,
+        intensity_array: &Bound<'_, PyAny>,
         precursors: Vec<PyPrecursor>,
         total_ion_current: f32,
-        mobility_array: Option<Vec<f32>>,
+        mobility_array: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
-        use pyo3::exceptions::PyValueError;
+        let mz_in = F32Input::extract(mz_array, "mz_array")?;
+        let int_in = F32Input::extract(intensity_array, "intensity_array")?;
+        let mob_in = match mobility_array {
+            // `Spectrum(..., mobility_array=None)` is the no-mobility case, same
+            // as omitting the argument.
+            Some(obj) if !obj.is_none() => Some(F32Input::extract(obj, "mobility_array")?),
+            _ => None,
+        };
 
-        if mz_array.len() != intensity_array.len() {
+        let mz = mz_in.as_slice();
+        let intensities = int_in.as_slice();
+
+        if mz.len() != intensities.len() {
             return Err(PyValueError::new_err(
                 "mz_array and intensity_array must be the same length",
             ));
         }
 
-        if let Some(ref mob) = mobility_array {
-            if mob.len() != mz_array.len() {
-                return Err(PyValueError::new_err(
-                    "mobility_array must be the same length as mz_array",
-                ));
+        let peaks: Vec<Peak> = match &mob_in {
+            Some(mob_in) => {
+                let mob = mob_in.as_slice();
+                if mob.len() != mz.len() {
+                    return Err(PyValueError::new_err(
+                        "mobility_array must be the same length as mz_array",
+                    ));
+                }
+                // Single pass over three borrowed slices into the interleaved
+                // `Peak` layout.
+                (0..mz.len())
+                    .map(|i| Peak {
+                        mass: mz[i],
+                        intensity: intensities[i],
+                        mobility: mob[i],
+                    })
+                    .collect()
             }
-        }
-
-        let peaks: Vec<Peak> = match mobility_array {
-            Some(mob) => mz_array
-                .into_iter()
-                .zip(intensity_array.into_iter())
-                .zip(mob.into_iter())
-                .map(|((m, i), mo)| Peak { mass: m, intensity: i, mobility: mo })
-                .collect(),
-            None => mz_array
-                .into_iter()
-                .zip(intensity_array.into_iter())
-                .map(|(m, i)| Peak { mass: m, intensity: i, mobility: 0.0 })
+            None => mz
+                .iter()
+                .zip(intensities.iter())
+                .map(|(&m, &i)| Peak { mass: m, intensity: i, mobility: 0.0 })
                 .collect(),
         };
 
@@ -1524,6 +1579,21 @@ impl PyProcessedSpectrum {
     }
 
     #[getter]
+    pub fn file_id(&self) -> PyResult<usize> {
+        Ok(self.inner.file_id)
+    }
+
+    #[getter]
+    pub fn scan_start_time(&self) -> PyResult<f32> {
+        Ok(self.inner.scan_start_time)
+    }
+
+    #[getter]
+    pub fn total_ion_current(&self) -> PyResult<f32> {
+        Ok(self.inner.total_ion_current)
+    }
+
+    #[getter]
     pub fn peaks(&self) -> PyResult<Vec<(f32, f32)>> {
         // return Vec of (mz, intensity)
         Ok(self
@@ -1532,6 +1602,19 @@ impl PyProcessedSpectrum {
             .iter()
             .map(|p| (p.mass, p.intensity))
             .collect())
+    }
+
+    /// Per-peak ion mobility, in the same order as `peaks`.
+    ///
+    /// Returns `None` when the spectrum carries no mobility dimension, so
+    /// callers can round-trip a spectrum without silently turning absent
+    /// mobility into a column of zeros.
+    #[getter]
+    pub fn mobilities(&self) -> PyResult<Option<Vec<f32>>> {
+        if self.inner.peaks.iter().all(|p| p.mobility == 0.0) {
+            return Ok(None);
+        }
+        Ok(Some(self.inner.peaks.iter().map(|p| p.mobility).collect()))
     }
 
     #[getter]
