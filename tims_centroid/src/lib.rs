@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 
 use timsrust::{ImConverter, MzConverter, RtConverter};
 use crate::vendor::timsrust_centroid::{PeakReader, TimsError, TimsResult};
-use timsrust_core::io::formats::parquet::ParquetWriter;
+use timsrust_core::io::formats::parquet::{ParquetError, ParquetWriter};
 use timsrust_core::utils::thread::Synced;
 use timsrust_core::{ConvertibleTo, FrameIndex, ScanIndex, TofIndex};
 use timsrust_tdf::TdfFrameReader;
@@ -46,6 +46,54 @@ pub struct FullPeak {
     pub mz: f64,
     pub isolation_window_lower: Option<f64>,
     pub isolation_window_upper: Option<f64>,
+}
+
+/// Rows per parquet row group. 2^19 is a conventional size, not derived:
+/// large enough that a 3e8-peak run yields a few hundred row groups with a
+/// small footer and long sequential column chunks, small enough that the
+/// in-RAM buffer stays ~34 MB (~64 B/FullPeak) and readers fetch whole
+/// groups cheaply. Anything in ~256k-2M is reasonable (arrow's default is
+/// 2^20).
+const TARGET_ROWS_PER_GROUP: usize = 524_288;
+
+/// Buffers peaks in front of `ParquetWriter` so every `write_batch` call
+/// carries one full row group of `TARGET_ROWS_PER_GROUP` rows.
+///
+/// Without this, one `write_batch` per frame trips the writer's row-group
+/// heuristic (`max_batches / 32000 == 0` for runs under 32k frames) into
+/// closing a row group per frame: a 7 GB run came out as ~27k row groups of
+/// ~11k rows, with a multi-second footer and one network round trip per
+/// group for any remote reader.
+struct BufferedPeakWriter {
+    writer: ParquetWriter<FullPeak>,
+    buf: Vec<FullPeak>,
+}
+
+impl BufferedPeakWriter {
+    fn new(writer: ParquetWriter<FullPeak>) -> Self {
+        Self { writer, buf: Vec::with_capacity(TARGET_ROWS_PER_GROUP) }
+    }
+
+    /// Queue one frame's peaks; writes whole row groups as they fill.
+    fn append(&mut self, mut peaks: Vec<FullPeak>) -> Result<(), ParquetError> {
+        self.buf.append(&mut peaks);
+        while self.buf.len() >= TARGET_ROWS_PER_GROUP {
+            let rest = self.buf.split_off(TARGET_ROWS_PER_GROUP);
+            let chunk = std::mem::replace(&mut self.buf, rest);
+            self.writer.write_batch(chunk)?;
+        }
+        Ok(())
+    }
+
+    /// Write the final partial row group. Must run before the writer's
+    /// `Drop` closes the file, or the tail of the data is lost.
+    fn finish(&mut self) -> Result<(), ParquetError> {
+        if !self.buf.is_empty() {
+            let chunk = std::mem::take(&mut self.buf);
+            self.writer.write_batch(chunk)?;
+        }
+        Ok(())
+    }
 }
 
 /// How tof/scan indices become m/z and 1/K0.
@@ -162,10 +210,12 @@ pub fn centroid_to_parquet(
     };
 
     let frame_count = peak_reader.frame_count();
-    let mut writer = ParquetWriter::<FullPeak>::new(out_path)
+    let writer = ParquetWriter::<FullPeak>::new(out_path)
         .map_err(|e| TimsError::new(e.to_string()))?;
-    writer.set_max_batch_count(frame_count);
-    let synced_writer = Synced::from(writer);
+    // No set_max_batch_count: batching is handled by BufferedPeakWriter,
+    // whose large batches make the writer's own row-group heuristic moot
+    // (it flushes per batch, which is exactly one row group per batch).
+    let synced_writer = Synced::from(BufferedPeakWriter::new(writer));
 
     // Frames complete out of order, so progress is a count of finished frames
     // rather than the highest index reached.
@@ -205,6 +255,13 @@ pub fn centroid_to_parquet(
         })
         .sum::<usize>();
 
+    // Write the final partial row group before the writer drops (Drop closes
+    // the file; anything still buffered would be lost).
+    synced_writer
+        .with_lock(|w| w.finish())
+        .expect("parquet writer mutex poisoned")
+        .map_err(|e| TimsError::new(e.to_string()))?;
+
     Ok(peak_count)
 }
 
@@ -217,7 +274,7 @@ fn centroid_one_frame(
     >,
     calibration: &Calibration,
     rt_converter: &RtConverter,
-    synced_writer: &Synced<ParquetWriter<FullPeak>>,
+    synced_writer: &Synced<BufferedPeakWriter>,
 ) -> usize {
     {
             let Ok(peaks) = peak_reader.get_peaks_from_frame(index) else {
@@ -269,7 +326,7 @@ fn centroid_one_frame(
 
             let written = peaks.len();
             let _ = synced_writer
-                .with_lock(|w| w.write_batch(peaks))
+                .with_lock(|w| w.append(peaks))
                 .expect("parquet writer mutex poisoned");
             written
     }
@@ -301,4 +358,63 @@ fn index_bounds(d_path: &str) -> TimsResult<(u32, u32)> {
         .map_err(|e| TimsError::new(format!("MAX(NumScans) not readable: {e}")))?;
 
     Ok((tof_max_index, scan_max_index))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn peak(i: u32) -> FullPeak {
+        FullPeak {
+            frame: i / 100,
+            scan: i % 900,
+            tof: i,
+            apex_intensity: u64::from(i) * 3,
+            rt: f64::from(i) * 0.01,
+            im: 1.0,
+            mz: 400.0 + f64::from(i) * 1e-4,
+            isolation_window_lower: None,
+            isolation_window_upper: None,
+        }
+    }
+
+    /// Row groups come out at TARGET_ROWS_PER_GROUP regardless of how small
+    /// the incoming per-frame batches are, and every row survives. This is
+    /// the regression test for the one-row-group-per-frame layout (a 7 GB
+    /// run producing ~27k tiny groups).
+    #[test]
+    fn buffered_writer_emits_full_row_groups() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("peaks.parquet");
+
+        let writer = ParquetWriter::<FullPeak>::new(&path).unwrap();
+        let mut buffered = BufferedPeakWriter::new(writer);
+
+        // 2.5 row groups' worth of rows, delivered in frame-sized dribbles
+        // (odd size so chunk boundaries never align with batch boundaries).
+        let total: usize = TARGET_ROWS_PER_GROUP * 5 / 2;
+        let mut sent = 0usize;
+        while sent < total {
+            let n = 1013.min(total - sent);
+            buffered
+                .append(((sent as u32)..(sent + n) as u32).map(peak).collect())
+                .unwrap();
+            sent += n;
+        }
+        buffered.finish().unwrap();
+        drop(buffered); // Drop closes the file
+
+        let file = std::fs::File::open(&path).unwrap();
+        let reader = parquet::file::reader::SerializedFileReader::new(file).unwrap();
+        use parquet::file::reader::FileReader;
+        let md = reader.metadata();
+        assert_eq!(md.file_metadata().num_rows() as usize, total);
+        assert_eq!(md.num_row_groups(), 3); // 2 full + 1 remainder
+        assert_eq!(md.row_group(0).num_rows() as usize, TARGET_ROWS_PER_GROUP);
+        assert_eq!(md.row_group(1).num_rows() as usize, TARGET_ROWS_PER_GROUP);
+        assert_eq!(
+            md.row_group(2).num_rows() as usize,
+            total - 2 * TARGET_ROWS_PER_GROUP
+        );
+    }
 }

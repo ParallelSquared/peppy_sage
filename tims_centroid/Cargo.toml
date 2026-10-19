@@ -17,3 +17,9 @@ timsrust-tdf = "0.6.4"
 # Must match the version timsrust-core pulls in via filemanager: rusqlite links
 # the native sqlite3, and cargo permits only one such package in the graph.
 rusqlite = { version = "0.35", features = ["bundled"] }
+
+[dev-dependencies]
+# Version matches what timsrust-core already pulls in (see Cargo.lock), so the
+# test reads metadata with the same parquet the writer used.
+parquet = "57"
+tempfile = "3"
