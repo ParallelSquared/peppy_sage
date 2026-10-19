@@ -91,6 +91,10 @@ pub struct PyFragments {
 #[derive(Clone)]
 pub struct PyProcessedSpectrum {
     pub inner: Arc<ProcessedSpectrum<Peak>>,
+    /// Whether a mobility array was supplied at construction. `Peak.mobility`
+    /// defaults to 0.0 when it was not, and 0.0 is not a reachable 1/K0 -- this
+    /// flag is what lets the output report null instead of that sentinel.
+    pub has_mobility: bool,
 }
 
 #[pyclass(module = "peppy_sage")]
@@ -228,7 +232,10 @@ pub struct PyFeatureArrays {
     #[pyo3(get)]
     pub frag_mz_experimental: Vec<Vec<f32>>,
     #[pyo3(get)]
-    pub frag_mobilities: Vec<Vec<f32>>,
+    /// Per-matched-fragment ion mobility. `None` for features whose source
+    /// spectrum carried no mobility dimension, so an absent measurement is
+    /// null in the output rather than a column of zeros.
+    pub frag_mobilities: Vec<Option<Vec<f32>>>,
 }
 
 /// Iterates over the raw features, looks up the associated Peptide data,
@@ -237,9 +244,20 @@ fn features_to_arrays(
     // The result of score_many_spectra, flattened from Vec<Vec<Feature>> to Vec<Feature>
     all_features: Vec<Feature>,
     db_arc: Arc<IndexedDatabase>,
+    // Parallel to `all_features`: whether each feature's source spectrum carried a
+    // mobility dimension. Empty means "unknown", treated as no mobility.
+    feature_has_mobility: &[bool],
 ) -> PyFeatureArrays {
     let mut arrays = PyFeatureArrays::default();
     let total_features = all_features.len();
+
+    // A mismatch would silently misattribute mobility to the wrong features.
+    assert!(
+        feature_has_mobility.is_empty() || feature_has_mobility.len() == total_features,
+        "feature_has_mobility length {} != feature count {}",
+        feature_has_mobility.len(),
+        total_features,
+    );
 
     // We reserve capacity up front for better performance (all 38 fields)
     arrays.file_id.reserve(total_features);
@@ -291,7 +309,8 @@ fn features_to_arrays(
 
 
     // Iterate through the features and extract data
-    for feat in all_features.into_iter() {
+    for (feat_idx, feat) in all_features.into_iter().enumerate() {
+        let has_mobility = feature_has_mobility.get(feat_idx).copied().unwrap_or(false);
         // Fetch the associated Peptide object from the database once
         let pep = peptide_by_idx(&*db_arc, &feat.peptide_idx);
 
@@ -383,7 +402,12 @@ fn features_to_arrays(
             arrays.frag_intensities.push(frags.intensities.clone());
             arrays.frag_mz_calculated.push(frags.mz_calculated.clone());
             arrays.frag_mz_experimental.push(frags.mz_experimental.clone());
-            arrays.frag_mobilities.push(frags.mobilities.clone());
+            // Null rather than a list of zeros when the source spectrum had no
+            // mobility dimension -- 1/K0 is not measurable there, and 0.0 would
+            // be indistinguishable from a measurement downstream.
+            arrays.frag_mobilities.push(
+                has_mobility.then(|| frags.mobilities.clone())
+            );
         } else {
             // No fragments: store empty lists so the column lengths still match
             arrays.frag_charges.push(Vec::new());
@@ -392,7 +416,7 @@ fn features_to_arrays(
             arrays.frag_intensities.push(Vec::new());
             arrays.frag_mz_calculated.push(Vec::new());
             arrays.frag_mz_experimental.push(Vec::new());
-            arrays.frag_mobilities.push(Vec::new());
+            arrays.frag_mobilities.push(has_mobility.then(Vec::new));
         }
     }
 
@@ -643,9 +667,14 @@ impl PyScorer {
 
         // 1) Snapshot Rust-owned data while holding the GIL
         let mut rust_specs: Vec<Arc<ProcessedSpectrum<Peak>>> = Vec::with_capacity(spectra.len());
+        // Parallel to `rust_specs`: the mobility flag is a property of the Python
+        // wrapper, not of `ProcessedSpectrum`, so capture it before dropping the
+        // handles.
+        let mut spec_has_mobility: Vec<bool> = Vec::with_capacity(spectra.len());
         for handle in &spectra {
             let s = handle.borrow(py);
             rust_specs.push(Arc::clone(&s.inner)); // O(1) Arc clone
+            spec_has_mobility.push(s.has_mobility);
         }
         let db_arc = Arc::clone(&db.inner);        // O(1) Arc clone
         let cfg = self.config.clone();             // cheap struct clone
@@ -672,6 +701,22 @@ impl PyScorer {
             }
         });
 
+        // `par_iter().map()` preserves order, so `results[i]` is spectrum `i`'s
+        // features. Expand the per-spectrum flag to per-feature before flattening,
+        // while that grouping is still visible.
+        assert_eq!(
+            results.len(),
+            spec_has_mobility.len(),
+            "scoring returned {} result groups for {} spectra",
+            results.len(),
+            spec_has_mobility.len(),
+        );
+        let feature_has_mobility: Vec<bool> = results
+            .iter()
+            .zip(spec_has_mobility.iter())
+            .flat_map(|(feats, &has_mob)| std::iter::repeat(has_mob).take(feats.len()))
+            .collect();
+
         // The first flat_map flattens the results from Vec<Vec<Feature>> to Vec<Feature>
         let all_features: Vec<Feature> = results
             .into_iter()
@@ -680,7 +725,7 @@ impl PyScorer {
 
         // Perform the final data extraction and formatting, all in fast Rust code
         let feature_arrays = py.allow_threads(|| {
-            features_to_arrays(all_features, db_arc)
+            features_to_arrays(all_features, db_arc, &feature_has_mobility)
         });
 
         Ok(feature_arrays)
@@ -1345,6 +1390,31 @@ impl PyFeatureArrays {
             Ok(chunked.with_name(PlSmallStr::from_str(name)).into_column())
         }
 
+        /// As above, but `None` entries become nulls in the list column rather
+        /// than empty lists -- an absent measurement is not a zero-length one.
+        fn opt_vec_vec_f32_to_list_column(
+            name: &str,
+            data: &[Option<Vec<f32>>],
+        ) -> PolarsResult<Column> {
+            let chunked: ListChunked = data
+                .iter()
+                .map(|opt| {
+                    opt.as_ref()
+                        .map(|v| Series::new(PlSmallStr::from_static(""), v.as_slice()))
+                })
+                .collect();
+            // An all-null column infers List(Null); pin it to List(Float32) so a
+            // chunk with no mobility concatenates with one that has it.
+            let chunked = if data.iter().all(|o| o.is_none()) {
+                chunked.cast(&DataType::List(Box::new(DataType::Float32)))?
+                    .list()?
+                    .clone()
+            } else {
+                chunked
+            };
+            Ok(chunked.with_name(PlSmallStr::from_str(name)).into_column())
+        }
+
         // Helper to convert Vec<Vec<String>> to a List column
         fn vec_vec_string_to_list_column(name: &str, data: &[Vec<String>]) -> PolarsResult<Column> {
             let chunks: Vec<Series> = data
@@ -1439,7 +1509,7 @@ impl PyFeatureArrays {
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to build frag_mz_calculated column: {}", e)))?;
         let frag_mz_exp_col = vec_vec_f32_to_list_column("frag_mz_experimental", &self.frag_mz_experimental)
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to build frag_mz_experimental column: {}", e)))?;
-        let frag_mobilities_col = vec_vec_f32_to_list_column("frag_mobilities", &self.frag_mobilities)
+        let frag_mobilities_col = opt_vec_vec_f32_to_list_column("frag_mobilities", &self.frag_mobilities)
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to build frag_mobilities column: {}", e)))?;
 
         // Combine all columns
@@ -1560,6 +1630,7 @@ impl PyProcessedSpectrum {
         };
 
         Ok(PyProcessedSpectrum {
+            has_mobility: mob_in.is_some(),
             inner: Arc::new(ProcessedSpectrum {
                 level: 2,
                 id,
@@ -1611,7 +1682,7 @@ impl PyProcessedSpectrum {
     /// mobility into a column of zeros.
     #[getter]
     pub fn mobilities(&self) -> PyResult<Option<Vec<f32>>> {
-        if self.inner.peaks.iter().all(|p| p.mobility == 0.0) {
+        if !self.has_mobility {
             return Ok(None);
         }
         Ok(Some(self.inner.peaks.iter().map(|p| p.mobility).collect()))
