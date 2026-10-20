@@ -145,6 +145,92 @@ class IndexedDatabase:
 
         return cls(inner)
 
+    @classmethod
+    def from_columnar(
+            cls,
+            seq,
+            mod_seq,
+            mods_values,
+            mods_offsets,
+            frag_mz,
+            frag_intensity,
+            frag_codes,
+            frag_offsets,
+            frag_lengths,
+            ion_kinds: List[str],
+            bucket_size: int = 8192,
+            min_ion_index: int = 1,
+            generate_decoys: bool = False,
+            decoy_tag: str = "rev_",
+            peptide_min_mass: float = 500.0,
+            peptide_max_mass: float = 5000.0,
+    ) -> "IndexedDatabase":
+        """Build from columnar (CSR) arrays, without a one-row-per-fragment frame.
+
+        An alternate entry point to `from_library`, which remains the general
+        DataFrame route. Use this when you already hold a columnar library: it
+        avoids materializing the long-form intermediate, where every precursor
+        field is repeated across all of that precursor's fragments. On a large
+        library that intermediate is the peak-memory event, not the ingest.
+
+        Produces a database identical to `from_library` on the equivalent frame.
+
+        Args:
+            seq: length-N sequence of stripped peptide strings.
+            mod_seq: length-N sequence of modified peptide strings. Entries
+                sharing a modified peptide are merged into one peptide, with
+                their fragments averaged across charge states.
+            mods_values: float32 CSR values -- per-residue modification masses,
+                concatenated. Entry i spans mods_offsets[i]:mods_offsets[i+1]
+                and must be len(seq[i]) + 2 long (N-term, residues..., C-term).
+            mods_offsets: int64, length N+1.
+            frag_mz: float32, length M.
+            frag_intensity: float32, length M.
+            frag_codes: int32, length M. Packed as ion_type 3 bits at 0,
+                ordinal 8 bits at 3, loss 3 bits at 11, charge-1 3 bits at 14,
+                isotope 4 bits at 17.
+            frag_offsets: int64, length N. Entry i's fragments start here.
+            frag_lengths: int32, length N. Offsets are explicit, so the
+                fragment arrays may contain gaps.
+
+        Arrays are borrowed, not copied, so they must be C-contiguous and have
+        exactly the dtypes above.
+        """
+        try:
+            ion_enum_list = [ION_KIND_MAP[k.lower()]() for k in ion_kinds]
+        except KeyError as e:
+            raise ValueError(
+                f"Invalid ion kind: {e.args[0]}. Must be one of {list(ION_KIND_MAP)}"
+            )
+
+        import numpy as np
+
+        def _arr(a, dtype, name):
+            out = np.ascontiguousarray(a, dtype=dtype)
+            if out.ndim != 1:
+                raise ValueError(f"{name} must be 1-dimensional, got shape {out.shape}")
+            return out
+
+        inner = _rust.PyIndexedDatabase.from_columnar_and_config(
+            seq=list(seq),
+            mod_seq=list(mod_seq),
+            mods_values=_arr(mods_values, np.float32, "mods_values"),
+            mods_offsets=_arr(mods_offsets, np.int64, "mods_offsets"),
+            frag_mz=_arr(frag_mz, np.float32, "frag_mz"),
+            frag_intensity=_arr(frag_intensity, np.float32, "frag_intensity"),
+            frag_codes=_arr(frag_codes, np.int32, "frag_codes"),
+            frag_offsets=_arr(frag_offsets, np.int64, "frag_offsets"),
+            frag_lengths=_arr(frag_lengths, np.int32, "frag_lengths"),
+            bucket_size=bucket_size,
+            ion_kinds=ion_enum_list,
+            min_ion_index=min_ion_index,
+            generate_decoys=generate_decoys,
+            decoy_tag=decoy_tag,
+            peptide_min_mass=peptide_min_mass,
+            peptide_max_mass=peptide_max_mass,
+        )
+
+        return cls(inner)
 
     # -------------------------------------------------------------------------
     # Properties

@@ -187,10 +187,13 @@ pub fn build_indexed_database_from_library(
     // 1) Collect unique peptides: ModifiedPeptide -> (StrippedPeptide, mods_vec)
     let mut pep_mods: BTreeMap<String, (String, Vec<f32>)> = BTreeMap::new();
 
+    // Optional: libraries without neutral losses may omit the column entirely.
+    let frag_loss_col_opt = df.column("FragmentLossType").ok();
+
     // 2) Aggregate ions across precursor charge states:
-    // key = (ModifiedPeptide, FragmentType, FragmentNumber, FragmentCharge)
+    // key = (ModifiedPeptide, FragmentType, FragmentNumber, FragmentCharge, loss)
     // value = (mz_sum, intensity_sum, count)
-    let mut ion_agg: BTreeMap<(String, String, i32, i32), (f32, f32, u32)> = BTreeMap::new();
+    let mut ion_agg: BTreeMap<(String, String, i32, i32, u8), (f32, f32, u32)> = BTreeMap::new();
 
     for idx in 0..n_rows {
         // -------- peptide-level stuff --------
@@ -309,7 +312,25 @@ pub fn build_indexed_database_from_library(
         let mz = anyvalue_to_f32(&frag_mz_val, "FragmentMz", idx);
         let inten = anyvalue_to_f32(&frag_int_val, "RelativeIntensity", idx);
 
-        let key = (modified.clone(), frag_type, frag_num, frag_z);
+        let loss = match &frag_loss_col_opt {
+            Some(col) => {
+                let v = col
+                    .get(idx)
+                    .unwrap_or_else(|_| panic!("null 'FragmentLossType' at row {}", idx));
+                match v {
+                    AnyValue::String(s) => loss_code(s),
+                    AnyValue::StringOwned(ref s) => loss_code(s.as_str()),
+                    AnyValue::Null => 0,
+                    other => panic!(
+                        "'FragmentLossType' must be Utf8, got {:?} at row {}",
+                        other, idx
+                    ),
+                }
+            }
+            None => 0,
+        };
+
+        let key = (modified.clone(), frag_type, frag_num, frag_z, loss);
 
         let entry = ion_agg.entry(key).or_insert((0.0f32, 0.0f32, 0u32));
         entry.0 += mz;
@@ -318,10 +339,100 @@ pub fn build_indexed_database_from_library(
     }
 
     // -------- build peptides (unique per ModifiedPeptide) --------
-    let mut peptides: Vec<Peptide> = Vec::with_capacity(pep_mods.len());
-    let mut pep_index: BTreeMap<String, PeptideIx> = BTreeMap::new();
+    // BTreeMap iteration is lexicographic by ModifiedPeptide, which fixes the
+    // PeptideIx assignment order. `finish_library_database` relies on that.
+    let peptides_sorted: Vec<(String, String, Vec<f32>)> = pep_mods
+        .into_iter()
+        .map(|(modified, (seq, mods_vec))| (modified, seq, mods_vec))
+        .collect();
 
-    for (modified, (seq, mods_vec)) in pep_mods {
+    let pep_index: BTreeMap<&str, u32> = peptides_sorted
+        .iter()
+        .enumerate()
+        .map(|(i, (modified, _, _))| (modified.as_str(), i as u32))
+        .collect();
+
+    // BTreeMap key order is (modified, ftype, fnum, fz) with ftype compared as a
+    // string, i.e. a < b < c < x < y < z -- the same ordering `kind_order` gives.
+    let ions: Vec<AggregatedIon> = ion_agg
+        .iter()
+        .map(|((modified, ftype, fnum, fz, loss), (mz_sum, inten_sum, count))| {
+            let pep_ix = *pep_index.get(modified.as_str()).unwrap_or_else(|| {
+                panic!("internal error: missing peptide index for '{}'", modified)
+            });
+            let kind = match ftype.as_str() {
+                "b" | "B" => Kind::B,
+                "y" | "Y" => Kind::Y,
+                "a" | "A" => Kind::A,
+                "x" | "X" => Kind::X,
+                "c" | "C" => Kind::C,
+                "z" | "Z" => Kind::Z,
+                other => panic!("unsupported FragmentType '{}' in library", other),
+            };
+            AggregatedIon {
+                pep_ix,
+                kind,
+                ordinal: *fnum as u16,
+                charge: *fz as u8,
+                loss: *loss,
+                avg_mz: mz_sum / (*count as f32),
+                avg_intensity: inten_sum / (*count as f32),
+            }
+        })
+        .collect();
+
+    finish_library_database(config, peptides_sorted, ions)
+}
+
+/// One fragment after aggregation across precursor charge states.
+struct AggregatedIon {
+    pep_ix: u32,
+    kind: Kind,
+    ordinal: u16,
+    charge: u8,
+    /// 0 none, 1 H2O, 2 NH3, 3 H3PO4.
+    loss: u8,
+    avg_mz: f32,
+    avg_intensity: f32,
+}
+
+/// Map a library's `FragmentLossType` spelling to its code.
+fn loss_code(name: &str) -> u8 {
+    match name {
+        "" | "noloss" | "NoLoss" | "none" | "None" => 0,
+        "H2O" | "h2o" => 1,
+        "NH3" | "nh3" => 2,
+        "H3PO4" | "h3po4" => 3,
+        other => panic!("unsupported FragmentLossType '{}' in library", other),
+    }
+}
+
+fn kind_order(k: Kind) -> u8 {
+    match k {
+        Kind::A => 0,
+        Kind::B => 1,
+        Kind::C => 2,
+        Kind::X => 3,
+        Kind::Y => 4,
+        Kind::Z => 5,
+    }
+}
+
+/// Shared tail for every library-mode ingest path.
+///
+/// `peptides_sorted` must be ordered lexicographically by ModifiedPeptide --
+/// element `i` becomes `PeptideIx(i)`, and `ions[*].pep_ix` indexes into it.
+/// `ions` must be ordered by (pep_ix, kind_order, ordinal, charge); the
+/// DataFrame path gets that for free from its BTreeMap, and the columnar path
+/// sorts to match, so both produce byte-identical databases.
+fn finish_library_database(
+    config: IndexingConfig,
+    peptides_sorted: Vec<(String, String, Vec<f32>)>,
+    ions: Vec<AggregatedIon>,
+) -> IndexedDatabase {
+    let mut peptides: Vec<Peptide> = Vec::with_capacity(peptides_sorted.len());
+
+    for (modified, seq, mods_vec) in peptides_sorted {
         let n = seq.len();
         if mods_vec.len() != n + 2 {
             panic!(
@@ -337,9 +448,9 @@ pub fn build_indexed_database_from_library(
 
         let mono = mono_from_seq_and_mods(&seq, &mods_vec);
 
-        let seq_bytes: Arc<[u8]> = seq.clone().into_bytes().into_boxed_slice().into();
+        let seq_bytes: Arc<[u8]> = seq.into_bytes().into_boxed_slice().into();
 
-        let peptide = Peptide {
+        peptides.push(Peptide {
             sequence: seq_bytes,
             monoisotopic: mono,
             proteins: vec![Arc::from("LIBRARY".to_string())],
@@ -351,69 +462,44 @@ pub fn build_indexed_database_from_library(
             semi_enzymatic: false,
             precursor_charge: None,
             position: Position::default(),
-            modified_peptide: Some(modified.clone()),
-        };
-
-        let ix = PeptideIx(peptides.len() as u32);
-        pep_index.insert(modified, ix);
-        peptides.push(peptide);
+            modified_peptide: Some(modified),
+        });
     }
 
     // -------- build fragments from aggregated ions --------
-    let mut fragments: Vec<Theoretical> = Vec::with_capacity(ion_agg.len());
+    let mut fragments: Vec<Theoretical> = Vec::with_capacity(ions.len());
     let mut library_frags: Vec<Vec<LibraryFragment>> = vec![Vec::new(); peptides.len()];
 
-    for ((modified, ftype, fnum, fz), (mz_sum, inten_sum, count)) in ion_agg {
-        let pep_ix = *pep_index
-            .get(&modified)
-            .unwrap_or_else(|| panic!("internal error: missing peptide index for '{}'", modified));
-
-        let avg_mz  = mz_sum  / (count as f32);
-        let avg_int = inten_sum / (count as f32);
+    for ion in ions {
+        let pep_ix = PeptideIx(ion.pep_ix);
 
         // keep index lean: only peptide_index + fragment_mz
         fragments.push(Theoretical {
             peptide_index: pep_ix,
-            fragment_mz: avg_mz,
+            fragment_mz: ion.avg_mz,
         });
 
         // full fragment info goes into side table
-        let kind = match ftype.as_str() {
-            "b" | "B" => Kind::B,
-            "y" | "Y" => Kind::Y,
-            "a" | "A" => Kind::A,
-            "x" | "X" => Kind::X,
-            "c" | "C" => Kind::C,
-            "z" | "Z" => Kind::Z,
-            other => panic!("unsupported FragmentType '{}' in library", other),
-        };
-
-        library_frags[pep_ix.0 as usize].push(LibraryFragment {
-            mz: avg_mz,
-            kind,
-            ordinal: fnum as u16,
-            charge: fz as u8,
-            rel_intensity: avg_int,
+        library_frags[ion.pep_ix as usize].push(LibraryFragment {
+            mz: ion.avg_mz,
+            kind: ion.kind,
+            ordinal: ion.ordinal,
+            charge: ion.charge,
+            loss: ion.loss,
+            rel_intensity: ion.avg_intensity,
         });
     }
 
     // ensure sorted in ordinal order
-    fn kind_order(k: Kind) -> u8 {
-        match k {
-            Kind::A => 0,
-            Kind::B => 1,
-            Kind::C => 2,
-            Kind::X => 3,
-            Kind::Y => 4,
-            Kind::Z => 5,
-        }
-    }
-
+    // Sort on the full identity: with neutral losses distinguished, (kind,
+    // ordinal) alone leaves ties whose order an unstable sort would not pin down.
     for frags in &mut library_frags {
         frags.sort_unstable_by(|a, b| {
             kind_order(a.kind)
                 .cmp(&kind_order(b.kind))
                 .then(a.ordinal.cmp(&b.ordinal))
+                .then(a.charge.cmp(&b.charge))
+                .then(a.loss.cmp(&b.loss))
         });
     }
 
@@ -458,6 +544,155 @@ pub fn build_indexed_database_from_library(
         potential_mods: Vec::new(),
         decoy_tag: config.decoy_tag.clone(),
     }
+}
+
+/// A spectral library in the columnar (CSR) form jmod's `SpectrumLibraryStore`
+/// already holds, so no one-row-per-fragment frame has to be materialized.
+///
+/// `N` precursor entries, `M` fragments. Entry `i` owns the fragments at
+/// `frag_*[frag_offsets[i] .. frag_offsets[i] + frag_lengths[i]]` -- offsets are
+/// explicit because the store's fragment arrays may contain gaps.
+pub struct ColumnarLibrary<'a> {
+    pub seq: Vec<&'a str>,
+    pub mod_seq: Vec<&'a str>,
+    /// Per-residue modification masses, concatenated. Entry `i` spans
+    /// `mods_offsets[i]..mods_offsets[i+1]` and must be `seq[i].len() + 2` long
+    /// (N-term, per-residue..., C-term).
+    pub mods_values: &'a [f32],
+    pub mods_offsets: &'a [i64],
+    pub frag_mz: &'a [f32],
+    pub frag_intensity: &'a [f32],
+    /// Packed fragment codes: ion_type 3 bits @0, ordinal 8 bits @3,
+    /// loss 3 bits @11, charge-1 3 bits @14, isotope 4 bits @17.
+    pub frag_codes: &'a [i32],
+    pub frag_offsets: &'a [i64],
+    pub frag_lengths: &'a [i32],
+}
+
+fn kind_from_code(ion_type: i32) -> Kind {
+    match ion_type {
+        0 => Kind::B,
+        1 => Kind::Y,
+        2 => Kind::A,
+        3 => Kind::C,
+        4 => Kind::X,
+        5 => Kind::Z,
+        other => panic!("unsupported packed ion type {} in columnar library", other),
+    }
+}
+
+/// Build an indexed database straight from columnar arrays.
+///
+/// Produces a database identical to `build_indexed_database_from_library` on the
+/// equivalent DataFrame, including its aggregation of fragments across precursor
+/// charge states. Note that aggregation deliberately keys on
+/// (peptide, kind, ordinal, charge) and **not** on neutral loss, matching the
+/// DataFrame path.
+pub fn build_indexed_database_from_columnar(
+    config: IndexingConfig,
+    lib: ColumnarLibrary<'_>,
+) -> IndexedDatabase {
+    let n = lib.seq.len();
+    assert_eq!(n, lib.mod_seq.len(), "seq and mod_seq must be the same length");
+    assert_eq!(n, lib.frag_offsets.len(), "frag_offsets must have one entry per precursor");
+    assert_eq!(n, lib.frag_lengths.len(), "frag_lengths must have one entry per precursor");
+    assert_eq!(
+        lib.mods_offsets.len(),
+        n + 1,
+        "mods_offsets must have N+1 entries (CSR bounds)"
+    );
+    assert_eq!(
+        lib.frag_mz.len(),
+        lib.frag_intensity.len(),
+        "frag_mz and frag_intensity must be the same length"
+    );
+    assert_eq!(
+        lib.frag_mz.len(),
+        lib.frag_codes.len(),
+        "frag_mz and frag_codes must be the same length"
+    );
+
+    // 1) Unique ModifiedPeptide in lexicographic order -- the same order the
+    //    DataFrame path's BTreeMap produces, so PeptideIx values line up.
+    let mut uniq: Vec<&str> = lib.mod_seq.clone();
+    uniq.sort_unstable();
+    uniq.dedup();
+    let pep_ix_of: HashMap<&str, u32> = uniq
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (*s, i as u32))
+        .collect();
+
+    // 2) Sequence + mods per unique peptide, first entry wins (matching
+    //    `or_insert_with` on the DataFrame path).
+    let mut pep_seq: Vec<Option<(&str, &[f32])>> = vec![None; uniq.len()];
+    for i in 0..n {
+        let ix = pep_ix_of[lib.mod_seq[i]] as usize;
+        if pep_seq[ix].is_none() {
+            let lo = lib.mods_offsets[i] as usize;
+            let hi = lib.mods_offsets[i + 1] as usize;
+            pep_seq[ix] = Some((lib.seq[i], &lib.mods_values[lo..hi]));
+        }
+    }
+
+    // 3) Aggregate fragments across precursor charge states.
+    let mut ion_agg: HashMap<(u32, u8, u16, u8, u8), (f32, f32, u32)> = HashMap::new();
+    for i in 0..n {
+        let pep_ix = pep_ix_of[lib.mod_seq[i]];
+        let lo = lib.frag_offsets[i] as usize;
+        let len = lib.frag_lengths[i] as usize;
+        for j in lo..lo + len {
+            let code = lib.frag_codes[j];
+            let kind = kind_from_code(code & 0x7);
+            let ordinal = ((code >> 3) & 0xFF) as u16;
+            let loss = ((code >> 11) & 0x7) as u8;
+            let charge = (((code >> 14) & 0x7) + 1) as u8;
+            let entry = ion_agg
+                .entry((pep_ix, kind_order(kind), ordinal, charge, loss))
+                .or_insert((0.0, 0.0, 0));
+            entry.0 += lib.frag_mz[j];
+            entry.1 += lib.frag_intensity[j];
+            entry.2 += 1;
+        }
+    }
+
+    let peptides_sorted: Vec<(String, String, Vec<f32>)> = uniq
+        .iter()
+        .enumerate()
+        .map(|(ix, modified)| {
+            let (seq, mods) = pep_seq[ix]
+                .unwrap_or_else(|| panic!("internal error: no entry for peptide '{}'", modified));
+            (modified.to_string(), seq.to_string(), mods.to_vec())
+        })
+        .collect();
+
+    let mut ions: Vec<AggregatedIon> = ion_agg
+        .into_iter()
+        .map(
+            |((pep_ix, kord, ordinal, charge, loss), (mz_sum, int_sum, count))| AggregatedIon {
+                pep_ix,
+                kind: match kord {
+                    0 => Kind::A,
+                    1 => Kind::B,
+                    2 => Kind::C,
+                    3 => Kind::X,
+                    4 => Kind::Y,
+                    _ => Kind::Z,
+                },
+                ordinal,
+                charge,
+                loss,
+                avg_mz: mz_sum / (count as f32),
+                avg_intensity: int_sum / (count as f32),
+            },
+        )
+        .collect();
+
+    // Match the DataFrame path's BTreeMap iteration order so the two paths
+    // produce identical databases rather than merely equivalent ones.
+    ions.sort_unstable_by_key(|i| (i.pep_ix, kind_order(i.kind), i.ordinal, i.charge, i.loss));
+
+    finish_library_database(config, peptides_sorted, ions)
 }
 
 fn anyvalue_to_f32(v: &AnyValue, col: &str, idx: usize) -> f32 {

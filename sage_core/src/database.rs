@@ -388,6 +388,10 @@ pub struct LibraryFragment {
     pub kind: Kind,
     pub ordinal: u16,
     pub charge: u8,
+    /// Neutral loss: 0 none, 1 H2O, 2 NH3, 3 H3PO4. Part of a fragment's
+    /// identity -- `y7` and `y7-H2O` sit ~18 Da apart, so merging them would
+    /// average to an m/z matching neither.
+    pub loss: u8,
     pub rel_intensity: f32,
 }
 

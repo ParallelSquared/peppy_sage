@@ -6,7 +6,7 @@
 pub mod index_logic;
 pub mod scoring_logic;
 
-use crate::index_logic::{build_indexed_database, build_indexed_database_from_library, IndexingConfig};
+use crate::index_logic::{build_indexed_database, build_indexed_database_from_library, build_indexed_database_from_columnar, IndexingConfig};
 use crate::scoring_logic::{ScorerConfig, run_scoring};
 
 // --- CORE AND PY03 IMPORTS ---
@@ -232,6 +232,7 @@ pub struct PyFeatureArrays {
     #[pyo3(get)]
     pub frag_mz_experimental: Vec<Vec<f32>>,
     #[pyo3(get)]
+    pub frag_losses: Vec<Vec<i32>>,
     /// Per-matched-fragment ion mobility. `None` for features whose source
     /// spectrum carried no mobility dimension, so an absent measurement is
     /// null in the output rather than a column of zeros.
@@ -305,6 +306,7 @@ fn features_to_arrays(
     arrays.frag_intensities.reserve(total_features);
     arrays.frag_mz_calculated.reserve(total_features);
     arrays.frag_mz_experimental.reserve(total_features);
+    arrays.frag_losses.reserve(total_features);
     arrays.frag_mobilities.reserve(total_features);
 
 
@@ -402,6 +404,7 @@ fn features_to_arrays(
             arrays.frag_intensities.push(frags.intensities.clone());
             arrays.frag_mz_calculated.push(frags.mz_calculated.clone());
             arrays.frag_mz_experimental.push(frags.mz_experimental.clone());
+            arrays.frag_losses.push(frags.losses.iter().map(|&l| l as i32).collect());
             // Null rather than a list of zeros when the source spectrum had no
             // mobility dimension -- 1/K0 is not measurable there, and 0.0 would
             // be indistinguishable from a measurement downstream.
@@ -416,6 +419,7 @@ fn features_to_arrays(
             arrays.frag_intensities.push(Vec::new());
             arrays.frag_mz_calculated.push(Vec::new());
             arrays.frag_mz_experimental.push(Vec::new());
+            arrays.frag_losses.push(Vec::new());
             arrays.frag_mobilities.push(has_mobility.then(Vec::new));
         }
     }
@@ -565,6 +569,101 @@ impl PyIndexedDatabase {
             Ok(db) => Ok(PyIndexedDatabase { inner: Arc::new(db) }),
             Err(payload) => Err(PyRuntimeError::new_err(format!(
                 "Rust panic during indexed database generation from library: {}",
+                panic_payload_message(payload),
+            ))),
+        }
+    }
+
+    /// Build a library-mode database from columnar (CSR) arrays.
+    ///
+    /// An alternate entry point to `from_library_and_config`, which stays the
+    /// general DataFrame route. This one exists so callers that already hold a
+    /// columnar store never have to materialize a one-row-per-fragment frame --
+    /// on a large library that intermediate, with every precursor field repeated
+    /// across its fragments, is the peak-memory event.
+    ///
+    /// Produces a database identical to the DataFrame path. All numpy arrays are
+    /// borrowed, not copied; they must be C-contiguous with the dtypes below.
+    #[staticmethod]
+    #[pyo3(signature = (
+        seq,
+        mod_seq,
+        mods_values,
+        mods_offsets,
+        frag_mz,
+        frag_intensity,
+        frag_codes,
+        frag_offsets,
+        frag_lengths,
+        bucket_size,
+        ion_kinds,
+        min_ion_index,
+        generate_decoys,
+        decoy_tag,
+        peptide_min_mass,
+        peptide_max_mass,
+    ))]
+    pub fn from_columnar_and_config(
+        py: pyo3::Python<'_>,
+        seq: Vec<String>,
+        mod_seq: Vec<String>,
+        mods_values: PyReadonlyArray1<'_, f32>,
+        mods_offsets: PyReadonlyArray1<'_, i64>,
+        frag_mz: PyReadonlyArray1<'_, f32>,
+        frag_intensity: PyReadonlyArray1<'_, f32>,
+        frag_codes: PyReadonlyArray1<'_, i32>,
+        frag_offsets: PyReadonlyArray1<'_, i64>,
+        frag_lengths: PyReadonlyArray1<'_, i32>,
+        bucket_size: usize,
+        ion_kinds: Vec<PyKind>,
+        min_ion_index: usize,
+        generate_decoys: bool,
+        decoy_tag: String,
+        peptide_min_mass: f32,
+        peptide_max_mass: f32,
+    ) -> PyResult<Self> {
+        fn slice<'a, T: numpy::Element>(
+            a: &'a PyReadonlyArray1<'_, T>,
+            name: &str,
+        ) -> PyResult<&'a [T]> {
+            a.as_slice().map_err(|_| {
+                PyValueError::new_err(format!("{} must be a C-contiguous array", name))
+            })
+        }
+
+        let config = IndexingConfig {
+            bucket_size,
+            ion_kinds: ion_kinds.into_iter().map(|k| k.inner).collect(),
+            min_ion_index,
+            generate_decoys,
+            decoy_tag,
+            peptide_min_mass,
+            peptide_max_mass,
+        };
+
+        let lib = crate::index_logic::ColumnarLibrary {
+            seq: seq.iter().map(|s| s.as_str()).collect(),
+            mod_seq: mod_seq.iter().map(|s| s.as_str()).collect(),
+            mods_values: slice(&mods_values, "mods_values")?,
+            mods_offsets: slice(&mods_offsets, "mods_offsets")?,
+            frag_mz: slice(&frag_mz, "frag_mz")?,
+            frag_intensity: slice(&frag_intensity, "frag_intensity")?,
+            frag_codes: slice(&frag_codes, "frag_codes")?,
+            frag_offsets: slice(&frag_offsets, "frag_offsets")?,
+            frag_lengths: slice(&frag_lengths, "frag_lengths")?,
+        };
+
+        // The build is pure Rust over borrowed buffers; drop the GIL for it.
+        let result = py.allow_threads(|| {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                build_indexed_database_from_columnar(config, lib)
+            }))
+        });
+
+        match result {
+            Ok(db) => Ok(PyIndexedDatabase { inner: Arc::new(db) }),
+            Err(payload) => Err(PyRuntimeError::new_err(format!(
+                "Rust panic during indexed database generation from columnar library: {}",
                 panic_payload_message(payload),
             ))),
         }
@@ -911,6 +1010,12 @@ impl PyFragments {
         self.inner.mobilities.clone()
     }
 
+    /// Neutral loss per matched fragment: 0 none, 1 H2O, 2 NH3, 3 H3PO4.
+    #[getter]
+    pub fn losses(&self) -> Vec<i32> {
+        self.inner.losses.iter().map(|&l| l as i32).collect()
+    }
+
     /// Optional helper: return as Python dict for easier pandas conversion
     pub fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let dict = PyDict::new(py);
@@ -921,6 +1026,7 @@ impl PyFragments {
         dict.set_item("mz_calculated", self.mz_calculated())?;
         dict.set_item("mz_experimental", self.mz_experimental())?;
         dict.set_item("mobilities", self.mobilities())?;
+        dict.set_item("losses", self.losses())?;
         Ok(dict)
     }
 }
@@ -1287,6 +1393,7 @@ impl PyFeatureArrays {
         self.frag_intensities.extend(other.frag_intensities);
         self.frag_mz_calculated.extend(other.frag_mz_calculated);
         self.frag_mz_experimental.extend(other.frag_mz_experimental);
+        self.frag_losses.extend(other.frag_losses);
         self.frag_mobilities.extend(other.frag_mobilities);
     }
 
@@ -1360,6 +1467,7 @@ impl PyFeatureArrays {
             "frag_intensities",
             "frag_mz_calculated",
             "frag_mz_experimental",
+            "frag_losses",
             "frag_mobilities",
         ]
         .into_iter()
@@ -1509,6 +1617,8 @@ impl PyFeatureArrays {
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to build frag_mz_calculated column: {}", e)))?;
         let frag_mz_exp_col = vec_vec_f32_to_list_column("frag_mz_experimental", &self.frag_mz_experimental)
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to build frag_mz_experimental column: {}", e)))?;
+        let frag_losses_col = vec_vec_i32_to_list_column("frag_losses", &self.frag_losses)
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to build frag_losses column: {}", e)))?;
         let frag_mobilities_col = opt_vec_vec_f32_to_list_column("frag_mobilities", &self.frag_mobilities)
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to build frag_mobilities column: {}", e)))?;
 
@@ -1521,6 +1631,7 @@ impl PyFeatureArrays {
         all_columns.push(frag_intensities_col);
         all_columns.push(frag_mz_calc_col);
         all_columns.push(frag_mz_exp_col);
+        all_columns.push(frag_losses_col);
         all_columns.push(frag_mobilities_col);
 
         // Create DataFrame

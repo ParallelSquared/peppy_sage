@@ -158,6 +158,9 @@ pub struct Fragments {
     /// Per-matched-fragment ion mobility, copied from the matched experimental peak.
     /// Zero when the source spectrum has no mobility dimension.
     pub mobilities: Vec<f32>,
+    /// Per-matched-fragment neutral loss: 0 none, 1 H2O, 2 NH3, 3 H3PO4.
+    /// Always 0 on the theoretical path, which generates no loss ions.
+    pub losses: Vec<u8>,
 }
 
 static PSM_COUNTER: AtomicUsize = AtomicUsize::new(1);
@@ -736,6 +739,7 @@ impl<'db> Scorer<'db> {
                         fragments_details.fragment_ordinals.push(ord);
                         fragments_details.intensities.push(peak.intensity);
                         fragments_details.mobilities.push(peak.mobility);
+                        fragments_details.losses.push(frag.loss);
                     }
                 }
             }
@@ -806,6 +810,8 @@ impl<'db> Scorer<'db> {
                         fragments_details.fragment_ordinals.push(ord);
                         fragments_details.intensities.push(peak.intensity);
                         fragments_details.mobilities.push(peak.mobility);
+                        // Theoretical ion series carry no neutral losses.
+                        fragments_details.losses.push(0);
                     }
                 }
             }
